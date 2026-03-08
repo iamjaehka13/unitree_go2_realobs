@@ -184,7 +184,7 @@ def load_replay_schedule(command_file: str, default_dt: float = 0.02) -> ReplayS
 class GovernorConfig:
     temp_warn_c: float = 65.0
     temp_crit_c: float = 70.0
-    temp_stop_c: float = 72.0
+    temp_stop_c: float = 75.0
     cell_warn_v: float = 3.20
     cell_scale_stop_v: float = 3.05
     cell_hard_stop_v: float = 3.00

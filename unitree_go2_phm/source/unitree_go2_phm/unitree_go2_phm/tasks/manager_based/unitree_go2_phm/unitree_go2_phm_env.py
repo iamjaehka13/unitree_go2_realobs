@@ -1,9 +1,10 @@
 # =============================================================================
-# unitree_go2_phm/unitree_go2_phm_env.py
-# [Audit Status]: DIAMOND COPY (Debug Monitor Enabled)
-#  1. Skating Solution: Implicit PD Control enabled
-#  2. Physics Sync: Degraded gains -> PhysX
-#  3. Debugging: Real-time Contact Force Monitor (Console Output)
+# unitree_go2_phm/tasks/manager_based/unitree_go2_phm/unitree_go2_phm_env.py
+# PHM-enabled Unitree Go2 RL environment.
+#  1. Physics loop: PHM degradation is written into PhysX actuator state.
+#  2. Control loop: critical-scenario command governor can modify commands.
+#  3. Action path: optional post-unlatch smoothing reduces release spikes.
+#  4. Diagnostics: optional terminal snapshots and debug monitors feed evaluation.
 # =============================================================================
 
 from __future__ import annotations
@@ -52,7 +53,8 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
     
     Architecture:
     - Physics Loop (200Hz): Implicit PD Control (PhysX), Degradation Injection.
-    - Control Loop (50Hz): Action Processing, Sensor Noise, Metric Aggregation.
+    - Control Loop (50Hz): Command governor, action processing, sensor noise,
+      and metric aggregation.
     """
 
     def load_managers(self):
@@ -378,6 +380,16 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
         self._crit_unlatch_require_sat_recovery = bool(
             getattr(cfg, "critical_governor_unlatch_require_sat_recovery", False)
         )
+        self._crit_post_unlatch_action_ramp_s = float(
+            max(getattr(cfg, "critical_governor_post_unlatch_action_ramp_s", 0.0), 0.0)
+        )
+        self._crit_post_unlatch_action_ramp_steps_total = max(
+            int(round(self._crit_post_unlatch_action_ramp_s / max(float(self.step_dt), 1e-6))),
+            0,
+        )
+        self._crit_post_unlatch_action_delta_max = float(
+            max(getattr(cfg, "critical_governor_post_unlatch_action_delta_max", 0.0), 0.0)
+        )
         self._crit_pose_roll_pitch_max_rad = float(
             max(getattr(cfg, "critical_governor_pose_roll_pitch_max_rad", 0.25), 0.0)
         )
@@ -442,11 +454,18 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
         self._crit_cmd_raw = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         self._crit_cmd_eff = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         self._crit_last_cmd_eff = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        self._crit_last_action_eff: torch.Tensor | None = None
         self._crit_episode_steps = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self._crit_is_stand_episode = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self._crit_latch_steps_remaining = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self._crit_need_unlatch = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self._crit_unlatch_stable_steps = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
+        self._crit_post_unlatch_action_ramp_steps_remaining = torch.zeros(
+            (self.num_envs,), dtype=torch.long, device=self.device
+        )
+        self._crit_action_transition_delta_norm_step = torch.zeros(
+            (self.num_envs,), dtype=torch.float32, device=self.device
+        )
         self._crit_latch_trigger_count_ep = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
 
         self._base_velocity_cmd_write_through = False
@@ -456,7 +475,8 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
             logging.info(
                 "[CriticalGovernor] enabled=True v_cap_norm=%.3f wz_cap=%.3f ramp_tau=%.2fs "
                 "p_stand=%.2f stand_trigger=%.3f latch_hold=%d unlatch_steps=%d "
-                "sat_trigger_hi=%.3f sat_trigger_lo=%.3f unlatch_low_cmd=%s unlatch_sat_recovery=%s",
+                "sat_trigger_hi=%.3f sat_trigger_lo=%.3f unlatch_low_cmd=%s unlatch_sat_recovery=%s "
+                "post_unlatch_action_ramp_s=%.2f post_unlatch_action_delta_max=%.3f",
                 self._crit_v_cap_norm,
                 self._crit_wz_cap,
                 self._crit_ramp_tau_s,
@@ -468,6 +488,8 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
                 self._crit_sat_trigger_lo,
                 str(self._crit_unlatch_require_low_cmd),
                 str(self._crit_unlatch_require_sat_recovery),
+                self._crit_post_unlatch_action_ramp_s,
+                self._crit_post_unlatch_action_delta_max,
             )
 
     def _reset_critical_command_governor(self, env_ids: torch.Tensor) -> None:
@@ -478,16 +500,20 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
         self._crit_cmd_raw[ids] = 0.0
         self._crit_cmd_eff[ids] = 0.0
         self._crit_last_cmd_eff[ids] = 0.0
+        if isinstance(self._crit_last_action_eff, torch.Tensor):
+            self._crit_last_action_eff[ids] = 0.0
         self._crit_episode_steps[ids] = 0
         self._crit_is_stand_episode[ids] = False
         self._crit_latch_steps_remaining[ids] = 0
         self._crit_need_unlatch[ids] = False
         self._crit_unlatch_stable_steps[ids] = 0
+        self._crit_post_unlatch_action_ramp_steps_remaining[ids] = 0
         self._crit_latch_trigger_count_ep[ids] = 0.0
         self._crit_sat_any[ids] = False
         self._crit_sat_ratio[ids] = 0.0
         self._crit_sat_over_trigger[ids] = False
         self._crit_action_delta_norm_step[ids] = 0.0
+        self._crit_action_transition_delta_norm_step[ids] = 0.0
         self._crit_cmd_delta_norm_step[ids] = 0.0
         self._crit_governor_mode_step[ids] = 0
         self._crit_sat_latch.reset(ids)
@@ -683,6 +709,15 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
                 self.extras["crit/action_delta_latched_norm_max"] = torch.tensor(0.0, device=self.device)
                 self.extras["crit/cmd_delta_latched_norm_mean"] = torch.tensor(0.0, device=self.device)
                 self.extras["crit/cmd_delta_latched_norm_max"] = torch.tensor(0.0, device=self.device)
+                self.extras["crit/post_unlatch_action_ramp_s"] = torch.tensor(
+                    float(self._crit_post_unlatch_action_ramp_s), device=self.device
+                )
+                self.extras["crit/post_unlatch_action_ramp_active_ratio"] = torch.tensor(0.0, device=self.device)
+                self.extras["crit/post_unlatch_action_ramp_steps_remaining_mean"] = torch.tensor(
+                    0.0, device=self.device
+                )
+                self.extras["crit/action_transition_delta_norm_mean"] = torch.tensor(0.0, device=self.device)
+                self.extras["crit/action_transition_delta_norm_max"] = torch.tensor(0.0, device=self.device)
             return
 
         critical_mask = self._phm_scenario_id == int(self._phm_scenario_id_critical)
@@ -693,6 +728,7 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
             self._crit_latch_steps_remaining[non_critical_mask] = 0
             self._crit_need_unlatch[non_critical_mask] = False
             self._crit_unlatch_stable_steps[non_critical_mask] = 0
+            self._crit_post_unlatch_action_ramp_steps_remaining[non_critical_mask] = 0
             self._crit_latch_trigger_count_ep[non_critical_mask] = 0.0
 
         if torch.any(critical_mask):
@@ -773,6 +809,14 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
                 if unlatch_done.numel() > 0:
                     self._crit_need_unlatch[unlatch_done] = False
                     self._crit_unlatch_stable_steps[unlatch_done] = 0
+                    transition_steps = int(self._crit_post_unlatch_action_ramp_steps_total)
+                    if transition_steps <= 0 and self._crit_post_unlatch_action_delta_max > 0.0:
+                        # Clamp-only mode still needs one active transition step.
+                        transition_steps = 1
+                    if transition_steps > 0:
+                        self._crit_post_unlatch_action_ramp_steps_remaining[unlatch_done] = int(
+                            transition_steps
+                        )
 
             soft_latch_mask = critical_mask & self._crit_need_unlatch & (self._crit_latch_steps_remaining <= 0)
             latched_mask = hard_latch_mask | soft_latch_mask
@@ -793,7 +837,7 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
             self._crit_episode_steps[critical_mask] += 1
 
             # Governor mode taxonomy per step:
-            # 0=none, 1=v_cap, 2=stand, 3=stop_latch, 4=other.
+            # 0=none, 1=v_cap, 2=stand, 3=stop_latch, 4=reserved_other.
             cap_xy_applied = scale < (1.0 - 1e-6)
             cap_wz_applied = torch.abs(raw_cmd[:, 2]) > (float(self._crit_wz_cap) + 1e-6)
             mode_step = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
@@ -814,7 +858,11 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
             self.extras["crit/latch_trigger_rate"] = torch.mean((self._crit_latch_trigger_count_ep > 0).float())
             self.extras["crit/cmd_raw_norm_mean"] = torch.mean(torch.norm(self._crit_cmd_raw[:, :2], dim=1))
             self.extras["crit/cmd_eff_norm_mean"] = torch.mean(torch.norm(self._crit_cmd_eff[:, :2], dim=1))
+            self.extras["crit/post_unlatch_action_ramp_s"] = torch.tensor(
+                float(self._crit_post_unlatch_action_ramp_s), device=self.device
+            )
             self.extras["crit/cmd_delta_low_eps"] = torch.tensor(float(self._crit_cmd_delta_low_eps), device=self.device)
+            critical_ramp_active = critical_mask & (self._crit_post_unlatch_action_ramp_steps_remaining > 0)
             if torch.any(latched):
                 self.extras["crit/action_delta_latched_norm_mean"] = torch.mean(self._crit_action_delta_norm_step[latched])
                 self.extras["crit/action_delta_latched_norm_max"] = torch.max(self._crit_action_delta_norm_step[latched])
@@ -830,6 +878,26 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
                 self.extras["crit/cmd_delta_latched_norm_max"] = torch.tensor(0.0, device=self.device)
                 latched_low_cmd_delta_ratio = torch.tensor(0.0, device=self.device)
             self.extras["crit/latched_low_cmd_delta_ratio"] = latched_low_cmd_delta_ratio
+            if torch.any(critical_mask):
+                self.extras["crit/post_unlatch_action_ramp_active_ratio"] = torch.mean(
+                    critical_ramp_active[critical_mask].float()
+                )
+                self.extras["crit/post_unlatch_action_ramp_steps_remaining_mean"] = torch.mean(
+                    self._crit_post_unlatch_action_ramp_steps_remaining[critical_mask].float()
+                )
+                self.extras["crit/action_transition_delta_norm_mean"] = torch.mean(
+                    self._crit_action_transition_delta_norm_step[critical_mask]
+                )
+                self.extras["crit/action_transition_delta_norm_max"] = torch.max(
+                    self._crit_action_transition_delta_norm_step[critical_mask]
+                )
+            else:
+                self.extras["crit/post_unlatch_action_ramp_active_ratio"] = torch.tensor(0.0, device=self.device)
+                self.extras["crit/post_unlatch_action_ramp_steps_remaining_mean"] = torch.tensor(
+                    0.0, device=self.device
+                )
+                self.extras["crit/action_transition_delta_norm_mean"] = torch.tensor(0.0, device=self.device)
+                self.extras["crit/action_transition_delta_norm_max"] = torch.tensor(0.0, device=self.device)
             crit_count = torch.sum(critical_mask)
             if int(crit_count.item()) > 0:
                 self.extras["crit/sat_any_over_thr_ratio"] = torch.mean(self._crit_sat_latch.ratio[critical_mask])
@@ -874,6 +942,54 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
             self.extras["crit/sat_trigger_hi"] = torch.tensor(float(self._crit_sat_trigger_hi), device=self.device)
             self.extras["crit/sat_trigger_lo"] = torch.tensor(float(self._crit_sat_trigger_lo), device=self.device)
         self._crit_warn_step_i += 1
+
+    def _apply_critical_post_unlatch_action_transition(self, action: torch.Tensor) -> torch.Tensor:
+        """Smooth action release right after unlatch to reduce transition spikes."""
+        if not isinstance(action, torch.Tensor):
+            return action
+        if (
+            not isinstance(self._crit_last_action_eff, torch.Tensor)
+            or self._crit_last_action_eff.shape != action.shape
+        ):
+            self._crit_last_action_eff = torch.zeros_like(action)
+        if (not self._crit_governor_enable) or (
+            self._crit_post_unlatch_action_ramp_steps_total <= 0 and self._crit_post_unlatch_action_delta_max <= 0.0
+        ):
+            self._crit_action_transition_delta_norm_step[:] = 0.0
+            self._crit_last_action_eff[:] = action.detach()
+            return action
+
+        out = action.clone()
+        critical_mask = self._phm_scenario_id == int(self._phm_scenario_id_critical)
+        ramp_active = critical_mask & (self._crit_post_unlatch_action_ramp_steps_remaining > 0)
+
+        if torch.any(ramp_active):
+            ids = ramp_active.nonzero(as_tuple=False).squeeze(-1)
+            prev = self._crit_last_action_eff[ids]
+            tgt = action[ids]
+
+            total = max(int(self._crit_post_unlatch_action_ramp_steps_total), 1)
+            rem = self._crit_post_unlatch_action_ramp_steps_remaining[ids].to(torch.float32)
+            alpha = (float(total) - rem + 1.0) / float(total)
+            alpha = torch.clamp(alpha, min=0.0, max=1.0).unsqueeze(-1)
+
+            blended = prev + alpha * (tgt - prev)
+            if self._crit_post_unlatch_action_delta_max > 0.0:
+                delta = torch.clamp(
+                    blended - prev,
+                    min=-float(self._crit_post_unlatch_action_delta_max),
+                    max=float(self._crit_post_unlatch_action_delta_max),
+                )
+                blended = prev + delta
+            out[ids] = blended
+            self._crit_post_unlatch_action_ramp_steps_remaining[ids] = torch.clamp(
+                self._crit_post_unlatch_action_ramp_steps_remaining[ids] - 1,
+                min=0,
+            )
+
+        self._crit_action_transition_delta_norm_step[:] = torch.norm(out - action, dim=1)
+        self._crit_last_action_eff[:] = out.detach()
+        return out
 
     def _reset_eval_gait_metric_buffers(self, env_ids: torch.Tensor) -> None:
         if env_ids.numel() == 0:
@@ -1499,6 +1615,7 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
         # ---------------------------------------------------------------------
         action_device = action.to(self.device)
         action_in = self._apply_command_transport_dr(action_device)
+        action_in = self._apply_critical_post_unlatch_action_transition(action_in)
         self._crit_action_delta_norm_step[:] = torch.norm(action_in - action_device, dim=1)
         self.action_manager.process_action(action_in)
         self.recorder_manager.record_pre_step()
@@ -1674,7 +1791,7 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
 
     def _reset_idx(self, env_ids: Sequence[int]):
         """
-        [Audit Fix 7] Clear Separation of Reset Scopes
+        Reset the selected environments while keeping task/PHM reset scopes separated.
         """
         if isinstance(env_ids, slice):
             env_ids_t = torch.arange(self.num_envs, device=self.device, dtype=torch.long)[env_ids]
@@ -2123,10 +2240,17 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
         crit_sat_ratio = self._crit_sat_latch.ratio[env_ids]
         crit_sat_ratio_valid_steps = self._crit_sat_latch.valid_steps[env_ids].to(torch.float32)
         crit_action_delta = self._crit_action_delta_norm_step[env_ids]
+        crit_action_transition_delta = self._crit_action_transition_delta_norm_step[env_ids]
         crit_cmd_delta = self._crit_cmd_delta_norm_step[env_ids]
         crit_governor_mode = self._crit_governor_mode_step[env_ids].to(torch.float32)
         crit_action_delta_latched = crit_action_delta * crit_latched
         crit_cmd_delta_latched = crit_cmd_delta * crit_latched
+        crit_post_unlatch_ramp_active = (
+            self._crit_post_unlatch_action_ramp_steps_remaining[env_ids] > 0
+        ).to(torch.float32)
+        crit_post_unlatch_ramp_steps_remaining = self._crit_post_unlatch_action_ramp_steps_remaining[
+            env_ids
+        ].to(torch.float32)
         crit_governor_enabled = torch.full(
             (env_ids.numel(),),
             1.0 if self._crit_governor_enable else 0.0,
@@ -2152,10 +2276,15 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
             "crit/sat_any_over_thr_ratio": crit_sat_ratio.detach().clone(),
             "crit/sat_ratio_valid_steps": crit_sat_ratio_valid_steps.detach().clone(),
             "crit/action_delta_norm_step": crit_action_delta.detach().clone(),
+            "crit/action_transition_delta_norm_step": crit_action_transition_delta.detach().clone(),
             "crit/cmd_delta_norm_step": crit_cmd_delta.detach().clone(),
             "crit/governor_mode_step": crit_governor_mode.detach().clone(),
             "crit/action_delta_latched_norm_step": crit_action_delta_latched.detach().clone(),
             "crit/cmd_delta_latched_norm_step": crit_cmd_delta_latched.detach().clone(),
+            "crit/post_unlatch_action_ramp_active_step": crit_post_unlatch_ramp_active.detach().clone(),
+            "crit/post_unlatch_action_ramp_steps_remaining_step": (
+                crit_post_unlatch_ramp_steps_remaining.detach().clone()
+            ),
         }
 
         if self.enable_eval_gait_metrics:
@@ -2198,6 +2327,7 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
     def _log_phm_metrics(self):
         if self.phm_state is None: return
         temps = self._temperature_tensor_for_metrics()
+        log_dict = self.extras.setdefault("log", {})
 
         self.extras["phm/avg_temp"] = torch.mean(temps)
         if hasattr(self.phm_state, "motor_case_temp"):
@@ -2218,11 +2348,130 @@ class UnitreeGo2PhmEnv(ManagerBasedRLEnv):
                 self.extras["phm/fault_leg_rl_ratio"] = torch.mean(rl)
         if hasattr(self.phm_state, "fault_motor_id"):
             fault_motor_id = self.phm_state.fault_motor_id
+            num_motors = int(self.phm_state.fault_mask.shape[1]) if hasattr(self.phm_state, "fault_mask") else 12
+            if (
+                not hasattr(self, "_phm_fault_step_exposure_counts")
+                or int(getattr(self._phm_fault_step_exposure_counts, "numel", lambda: 0)()) != int(num_motors)
+            ):
+                self._phm_fault_step_exposure_counts = torch.zeros((num_motors,), device=self.device, dtype=torch.float32)
+            if not hasattr(self, "_phm_fault_step_exposure_total"):
+                self._phm_fault_step_exposure_total = torch.tensor(0.0, device=self.device, dtype=torch.float32)
             valid_fault = fault_motor_id >= 0
             if torch.any(valid_fault):
                 self.extras["phm/fault_motor_id_mean"] = torch.mean(fault_motor_id[valid_fault].float())
+                # Cumulative step-exposure counter: how many env-steps each motor fault was active.
+                binc = torch.bincount(fault_motor_id[valid_fault], minlength=num_motors).to(torch.float32)
+                self._phm_fault_step_exposure_counts += binc
+                self._phm_fault_step_exposure_total += float(torch.sum(valid_fault).item())
             else:
                 self.extras["phm/fault_motor_id_mean"] = torch.tensor(-1.0, device=self.device)
+
+        # Fault sampling diagnostics (reset-time episode exposure + step exposure).
+        if hasattr(self, "_phm_fault_episode_counts"):
+            ep_counts = self._phm_fault_episode_counts.to(torch.float32)
+            ep_total = torch.clamp(torch.sum(ep_counts), min=1.0)
+            self.extras["phm/fault_episode_total"] = torch.sum(ep_counts)
+            log_dict["phm/fault_episode_total"] = torch.sum(ep_counts)
+            for m in range(min(int(ep_counts.numel()), 12)):
+                key = f"phm/fault_episode_ratio_m{m:02d}"
+                val = ep_counts[m] / ep_total
+                self.extras[key] = val
+                log_dict[key] = val
+            if int(ep_counts.numel()) >= 12:
+                mirror_pairs = ((0, 3), (1, 4), (2, 5), (6, 9), (7, 10), (8, 11))
+                for k, (a, b) in enumerate(mirror_pairs):
+                    key = f"phm/fault_episode_ratio_pair_{k}"
+                    val = (ep_counts[a] + ep_counts[b]) / ep_total
+                    self.extras[key] = val
+                    log_dict[key] = val
+        if hasattr(self, "_phm_fault_step_exposure_counts"):
+            step_counts = self._phm_fault_step_exposure_counts.to(torch.float32)
+            step_total = torch.clamp(torch.sum(step_counts), min=1.0)
+            self.extras["phm/fault_step_exposure_total"] = torch.sum(step_counts)
+            log_dict["phm/fault_step_exposure_total"] = torch.sum(step_counts)
+            for m in range(min(int(step_counts.numel()), 12)):
+                key = f"phm/fault_step_exposure_ratio_m{m:02d}"
+                val = step_counts[m] / step_total
+                self.extras[key] = val
+                log_dict[key] = val
+            if int(step_counts.numel()) >= 12:
+                mirror_pairs = ((0, 3), (1, 4), (2, 5), (6, 9), (7, 10), (8, 11))
+                for k, (a, b) in enumerate(mirror_pairs):
+                    key = f"phm/fault_step_exposure_ratio_pair_{k}"
+                    val = (step_counts[a] + step_counts[b]) / step_total
+                    self.extras[key] = val
+                    log_dict[key] = val
+        if hasattr(self, "_phm_fault_focus_draw_count") and hasattr(self, "_phm_fault_focus_draw_total"):
+            draw_total = torch.clamp(self._phm_fault_focus_draw_total.to(torch.float32), min=1.0)
+            self.extras["phm/fault_focus_draw_count"] = self._phm_fault_focus_draw_count.to(torch.float32)
+            self.extras["phm/fault_focus_draw_total"] = self._phm_fault_focus_draw_total.to(torch.float32)
+            self.extras["phm/fault_focus_draw_ratio"] = self._phm_fault_focus_draw_count.to(torch.float32) / draw_total
+            log_dict["phm/fault_focus_draw_count"] = self._phm_fault_focus_draw_count.to(torch.float32)
+            log_dict["phm/fault_focus_draw_total"] = self._phm_fault_focus_draw_total.to(torch.float32)
+            log_dict["phm/fault_focus_draw_ratio"] = self._phm_fault_focus_draw_count.to(torch.float32) / draw_total
+        if hasattr(self, "_phm_fault_pair_sampling_probs"):
+            probs = self._phm_fault_pair_sampling_probs.to(torch.float32)
+            for k in range(min(int(probs.numel()), 6)):
+                key = f"phm/fault_pair_sampling_prob_pair_{k}"
+                self.extras[key] = probs[k]
+                log_dict[key] = probs[k]
+        if hasattr(self, "_phm_fault_pair_sampling_alpha"):
+            self.extras["phm/fault_pair_sampling_alpha"] = self._phm_fault_pair_sampling_alpha.to(torch.float32)
+            log_dict["phm/fault_pair_sampling_alpha"] = self._phm_fault_pair_sampling_alpha.to(torch.float32)
+        if hasattr(self, "_phm_fault_pair_adaptive_enabled"):
+            self.extras["phm/fault_pair_adaptive_enabled"] = self._phm_fault_pair_adaptive_enabled.to(torch.float32)
+            log_dict["phm/fault_pair_adaptive_enabled"] = self._phm_fault_pair_adaptive_enabled.to(torch.float32)
+        if hasattr(self, "_phm_fault_pair_adaptive_mix"):
+            self.extras["phm/fault_pair_adaptive_mix"] = self._phm_fault_pair_adaptive_mix.to(torch.float32)
+            log_dict["phm/fault_pair_adaptive_mix"] = self._phm_fault_pair_adaptive_mix.to(torch.float32)
+        if hasattr(self, "_phm_fault_pair_adaptive_target_probs"):
+            probs = self._phm_fault_pair_adaptive_target_probs.to(torch.float32)
+            for k in range(min(int(probs.numel()), 6)):
+                key = f"phm/fault_pair_adaptive_target_prob_pair_{k}"
+                self.extras[key] = probs[k]
+                log_dict[key] = probs[k]
+        if hasattr(self, "_phm_fault_pair_adaptive_scores"):
+            scores = self._phm_fault_pair_adaptive_scores.to(torch.float32)
+            for k in range(min(int(scores.numel()), 6)):
+                key = f"phm/fault_pair_adaptive_score_pair_{k}"
+                self.extras[key] = scores[k]
+                log_dict[key] = scores[k]
+        if hasattr(self, "_phm_fault_pair_adaptive_confidence"):
+            conf = self._phm_fault_pair_adaptive_confidence.to(torch.float32)
+            for k in range(min(int(conf.numel()), 6)):
+                key = f"phm/fault_pair_adaptive_conf_pair_{k}"
+                self.extras[key] = conf[k]
+                log_dict[key] = conf[k]
+        if hasattr(self, "_phm_fault_motor_adaptive_enabled"):
+            self.extras["phm/fault_motor_adaptive_enabled"] = self._phm_fault_motor_adaptive_enabled.to(torch.float32)
+            log_dict["phm/fault_motor_adaptive_enabled"] = self._phm_fault_motor_adaptive_enabled.to(torch.float32)
+        if hasattr(self, "_phm_fault_motor_adaptive_topk"):
+            self.extras["phm/fault_motor_adaptive_topk"] = self._phm_fault_motor_adaptive_topk.to(torch.float32)
+            log_dict["phm/fault_motor_adaptive_topk"] = self._phm_fault_motor_adaptive_topk.to(torch.float32)
+        if hasattr(self, "_phm_fault_motor_adaptive_target_probs"):
+            probs = self._phm_fault_motor_adaptive_target_probs.to(torch.float32)
+            for m in range(min(int(probs.numel()), 12)):
+                key = f"phm/fault_motor_adaptive_target_prob_m{m:02d}"
+                self.extras[key] = probs[m]
+                log_dict[key] = probs[m]
+        motor_scores = None
+        if hasattr(self, "_phm_fault_adaptive_motor_scores"):
+            motor_scores = self._phm_fault_adaptive_motor_scores.to(torch.float32)
+        elif hasattr(self, "_phm_fault_pair_adaptive_motor_scores"):
+            motor_scores = self._phm_fault_pair_adaptive_motor_scores.to(torch.float32)
+        if motor_scores is not None:
+            ms = motor_scores
+            for m in range(min(int(ms.numel()), 12)):
+                key = f"phm/fault_adaptive_motor_score_m{m:02d}"
+                self.extras[key] = ms[m]
+                log_dict[key] = ms[m]
+        if hasattr(self, "_phm_fault_adaptive_motor_confidence"):
+            conf = self._phm_fault_adaptive_motor_confidence.to(torch.float32)
+            for m in range(min(int(conf.numel()), 12)):
+                key = f"phm/fault_adaptive_motor_conf_m{m:02d}"
+                self.extras[key] = conf[m]
+                log_dict[key] = conf[m]
+
         if hasattr(self.phm_state, "min_voltage_log"):
              self.extras["phm/min_voltage"] = torch.min(self.phm_state.min_voltage_log)
         if hasattr(self.phm_state, "cell_voltage"):

@@ -1,6 +1,6 @@
 # =============================================================================
-# unitree_go2_phm/config/unitree_go2_phm_env_cfg.py
-# [Audit Status]: OPTIMIZED (Stability Fixed + PHM Deduped)
+# unitree_go2_phm/tasks/manager_based/unitree_go2_phm/unitree_go2_phm_env_cfg.py
+# Main PHM task configuration for Unitree Go2.
 # =============================================================================
 
 from __future__ import annotations
@@ -328,12 +328,12 @@ class ObservationsCfg:
             }
         )
 
-        # [Fix #6] LongTermHealthBuffer 피로도 기울기 관측 (dead code 활성화)
+        # LongTermHealthBuffer 기반 피로도 기울기 관측.
         degradation_trend = ObsTerm(
             func=phm_mdp.degradation_slope,
             params={"asset_cfg": SceneEntityCfg("robot")}
         )
-        # [Fix #12] LongTermHealthBuffer 누적 과열 시간 관측 (dead code 활성화)
+        # LongTermHealthBuffer 기반 누적 과열 시간 관측.
         thermal_overload = ObsTerm(
             func=phm_mdp.thermal_overload_duration_obs,
             params={"asset_cfg": SceneEntityCfg("robot"), "scale": 0.01}
@@ -476,11 +476,9 @@ class RewardsCfg:
         params={"threshold": 0.5, "scale_factor": 1.0} 
     )
 
-    # [Fix] limit_temp=90.0 (TEMP_CRITICAL_THRESHOLD 기준):
-    #   - threshold = 90.0 * 0.95 = 85.5°C에서 페널티 시작.
-    #   - derating 시작(75°C)과 termination(90°C) 사이에 충분한 경고 구간 확보.
-    #   - 이전 limit_temp=79.0은 threshold=75.05°C로 derating 시작과 거의 동시여서
-    #     에이전트에게 사전 회피 여지가 없었음.
+    # limit_temp=90.0 (TEMP_CRITICAL_THRESHOLD 기준):
+    # - threshold = 90.0 * 0.95 = 85.5°C에서 페널티 시작
+    # - derating 시작(75°C)과 termination(90°C) 사이에 경고 구간 확보
     thermal_safety = RewTerm(
         func=phm_mdp.thermal_predictive_reward, 
         weight=0.03,
@@ -507,11 +505,8 @@ class TerminationsCfg:
 
     bad_orientation = TermTerm(func=mdp.bad_orientation, params={"limit_angle": 0.8})
     
-    # [Fix #8] 종료 임계값을 TEMP_CRITICAL_THRESHOLD(90°C)와 일치시킴.
-    # 이전: 85°C에서 종료하여 derating 구간(75~90°C)의 상위 5°C가 도달 불가.
-    # 수정: 90°C에서 종료하여 에이전트가 전체 derating 구간을 학습할 수 있도록 함.
-    # severe_derating은 env.py에서 min=0.05로 clamp되어 90°C에서도 소량 제어권이 남고,
-    # termination(90°C)이 먼저 트리거되어 안전하게 종료됩니다.
+    # 종료 임계값을 TEMP_CRITICAL_THRESHOLD(90°C)에 맞춘다.
+    # derating 구간(75~90°C)을 충분히 경험한 뒤 안전하게 종료되도록 유지한다.
     thermal_failure = TermTerm(func=phm_mdp.thermal_runaway, params={"threshold_temp": 90.0})
     motor_stall = TermTerm(func=phm_mdp.motor_stall, params={"stall_time_threshold_s": 0.5})
 
@@ -584,7 +579,44 @@ class UnitreeGo2PhmEnvCfg(ManagerBasedRLEnvCfg):
     # For single_motor_random: keep sampled fault motor for this many env steps.
     # This equalizes per-motor training step exposure across resets.
     phm_fault_hold_steps: int = 1000
-    # Critical command governor (command_manager.compute 직후 적용).
+    # Optional hard-case focus sampling on top of pair-uniform/hold logic.
+    # In plain focus mode, `phm_fault_focus_prob` is the probability of replacing
+    # a fresh draw with focus motors/pairs. In weighted-pair mode, the same value
+    # is reused as the uniform-vs-target mixing alpha.
+    phm_fault_focus_prob: float = 0.0
+    phm_fault_focus_motor_ids: tuple[int, ...] = ()
+    phm_fault_focus_pairs: tuple[tuple[int, int], ...] = ()
+    # Optional weighted pair sampler:
+    # p_pair = normalize(clamp((1-alpha)*uniform + alpha*target, floor, cap)),
+    # where alpha = phm_fault_focus_prob.
+    phm_fault_pair_weighted_enable: bool = False
+    phm_fault_pair_prob_floor: float = 0.0
+    phm_fault_pair_prob_cap: float = 1.0
+    # Target pair weights in mirror-pair order:
+    # [(0,3), (1,4), (2,5), (6,9), (7,10), (8,11)].
+    # Empty tuple => fallback target from phm_fault_focus_pairs.
+    phm_fault_pair_target_weights: tuple[float, ...] = ()
+    # Optional adaptive pair targeting (difficulty-driven).
+    # Uses previous-episode per-motor signals accumulated at reset time:
+    # non-timeout termination ratio, sat-ratio, and latch ratio.
+    # Final pair target = (1-mix)*manual_target + mix*adaptive_target.
+    phm_fault_pair_adaptive_enable: bool = False
+    phm_fault_pair_adaptive_mix: float = 1.0
+    phm_fault_pair_adaptive_beta: float = 4.0
+    phm_fault_pair_adaptive_ema: float = 0.9
+    phm_fault_pair_adaptive_min_episode_per_pair: float = 20.0
+    phm_fault_pair_adaptive_w_fail: float = 0.55
+    phm_fault_pair_adaptive_w_sat: float = 0.30
+    phm_fault_pair_adaptive_w_latch: float = 0.15
+    phm_fault_pair_adaptive_sat_scale: float = 1.0
+    # Optional recent worst-motor focus on top of the base sampler.
+    # A `phm_fault_focus_prob` fraction is replaced with recent worst top-k motors.
+    phm_fault_motor_adaptive_enable: bool = False
+    phm_fault_motor_adaptive_topk: int = 3
+    phm_fault_motor_adaptive_min_episode_per_motor: float = 20.0
+    # Critical command governor:
+    # - base-velocity command write-through is applied after command_manager.compute()
+    # - optional post-unlatch action smoothing runs before action_manager.process_action()
     phm_scenario_id_critical: int = 4
     critical_governor_enable: bool = True
     critical_governor_v_cap_norm: float = 0.15
@@ -604,6 +636,10 @@ class UnitreeGo2PhmEnvCfg(ManagerBasedRLEnvCfg):
     critical_governor_sat_trigger: float = 0.95
     critical_governor_sat_trigger_hi: float = 0.95
     critical_governor_sat_trigger_lo: float = 0.95
+    # Smooth transition right after unlatch to reduce post-unlatch saturation spikes.
+    critical_governor_post_unlatch_action_ramp_s: float = 0.0
+    # Optional per-step action slew clamp during post-unlatch ramp (0.0 = disabled).
+    critical_governor_post_unlatch_action_delta_max: float = 0.0
     # Velocity-command curriculum:
     # - keep easy standing/near-zero velocity phase in early training
     # - widen command ranges from `start_iter` onward.

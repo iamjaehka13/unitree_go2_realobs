@@ -1,8 +1,6 @@
 # =============================================================================
 # unitree_go2_phm/phm/interface.py
-# [Audit Status]: CURRICULUM ENABLED (Hybrid Ramp + Performance Gate)
-#  1. Smooth scenario-mixture ramp (no hard phase jump)
-#  2. Performance gate slows/freezes difficulty when walking destabilizes
+# PHM reset / dynamics / fault-sampling helpers shared by the Go2 tasks.
 # =============================================================================
 from __future__ import annotations
 
@@ -62,6 +60,14 @@ _PHM_LOG_FLAGS = {
     "fault_mode_invalid_warned": False,
     "fault_fixed_id_invalid_warned": False,
     "fault_pair_uniform_unsupported_warned": False,
+    "fault_focus_prob_invalid_warned": False,
+    "fault_focus_invalid_entry_warned": False,
+    "fault_focus_empty_warned": False,
+    "fault_pair_target_weights_invalid_warned": False,
+    "fault_pair_prob_range_invalid_warned": False,
+    "fault_pair_weighted_requires_pair_uniform_warned": False,
+    "fault_pair_adaptive_requires_weighted_warned": False,
+    "fault_pair_adaptive_requires_pair_uniform_warned": False,
     "forced_scenario_invalid_warned": False,
     "forced_scenario_info_logged": False,
 }
@@ -74,6 +80,55 @@ _FAULT_MIRROR_PAIRS_12 = (
     (7, 10),
     (8, 11),
 )
+
+
+def thermal_termination_params_from_cfg(
+    cfg_obj,
+    default_threshold_temp: float = 90.0,
+    default_use_case_proxy: bool = False,
+    default_coil_to_case_delta_c: float = 5.0,
+) -> tuple[float | None, bool, float]:
+    """
+    Resolve thermal termination params from cfg.
+
+    Returns:
+      (threshold_temp_or_none, use_case_proxy, coil_to_case_delta_c)
+    """
+    threshold_temp: float | None = None
+    use_case_proxy = bool(default_use_case_proxy)
+    coil_to_case_delta_c = float(default_coil_to_case_delta_c)
+
+    term_cfg = getattr(cfg_obj, "terminations", None)
+    thermal_failure = getattr(term_cfg, "thermal_failure", None) if term_cfg is not None else None
+    params = getattr(thermal_failure, "params", None)
+    if isinstance(params, dict):
+        threshold_temp = float(params.get("threshold_temp", float(default_threshold_temp)))
+        use_case_proxy = bool(params.get("use_case_proxy", use_case_proxy))
+        coil_to_case_delta_c = float(params.get("coil_to_case_delta_c", coil_to_case_delta_c))
+
+    return threshold_temp, use_case_proxy, coil_to_case_delta_c
+
+
+def case_proxy_safe_coil_max_for_reset(
+    threshold_temp: float,
+    coil_to_case_delta_c: float,
+    *,
+    case_delta_low_c: float = 3.5,
+    immediate_term_margin_c: float = 0.5,
+    proxy_margin_c: float = 1.0,
+    ambient_temp_c: float = T_AMB,
+    min_coil_above_ambient_c: float = 8.0,
+) -> float:
+    """
+    Compute a conservative coil-temperature upper bound for reset-time sampling
+    under case-proxy thermal termination.
+    """
+    safe_coil_max_from_case = float(threshold_temp) + float(case_delta_low_c) - float(immediate_term_margin_c)
+    safe_coil_max_from_proxy = float(threshold_temp) + float(coil_to_case_delta_c) - float(proxy_margin_c)
+    return max(
+        float(ambient_temp_c) + float(min_coil_above_ambient_c),
+        min(safe_coil_max_from_case, safe_coil_max_from_proxy),
+    )
 
 
 def _quantize_channel(x: torch.Tensor, step: float) -> torch.Tensor:
@@ -878,6 +933,39 @@ def reset_phm_interface(env: ManagerBasedRLEnv, env_ids: torch.Tensor):
     if (not hasattr(env, "_phm_scenario_id")) or int(getattr(env._phm_scenario_id, "numel", lambda: 0)()) != int(env.num_envs):
         env._phm_scenario_id = torch.zeros((env.num_envs,), dtype=torch.long, device=device)
 
+    # Snapshot terminal-step episode diagnostics before state reset.
+    # These are used to estimate per-motor/pair difficulty for adaptive sampling.
+    prev_fault_motor_id = torch.full((num_resets,), -1, device=device, dtype=torch.long)
+    if hasattr(env.phm_state, "fault_motor_id"):
+        try:
+            prev_fault_motor_id = env.phm_state.fault_motor_id[env_ids].to(torch.long).clone()
+        except Exception:
+            pass
+
+    prev_time_out_mask = torch.zeros((num_resets,), device=device, dtype=torch.bool)
+    if hasattr(env, "termination_manager") and hasattr(env.termination_manager, "time_outs"):
+        try:
+            prev_time_out_mask = env.termination_manager.time_outs[env_ids].to(torch.bool).clone()
+        except Exception:
+            pass
+
+    prev_sat_ratio = torch.zeros((num_resets,), device=device, dtype=torch.float32)
+    if hasattr(env, "_crit_sat_ratio") and isinstance(getattr(env, "_crit_sat_ratio"), torch.Tensor):
+        try:
+            prev_sat_ratio = env._crit_sat_ratio[env_ids].to(torch.float32).clone()
+        except Exception:
+            pass
+
+    prev_latched_flag = torch.zeros((num_resets,), device=device, dtype=torch.float32)
+    if hasattr(env, "_crit_latch_steps_remaining") and hasattr(env, "_crit_need_unlatch"):
+        try:
+            prev_latched = (
+                (env._crit_latch_steps_remaining[env_ids] > 0) | env._crit_need_unlatch[env_ids]
+            ).to(torch.float32)
+            prev_latched_flag = prev_latched.clone()
+        except Exception:
+            pass
+
     # 1. 상태 및 적분기 초기화 (기존 코드 유지)
     env.phm_state.reset(env_ids)
     
@@ -1065,10 +1153,434 @@ def reset_phm_interface(env: ManagerBasedRLEnv, env_ids: torch.Tensor):
     except Exception:
         fault_hold_steps = 1000
     fault_hold_steps = max(fault_hold_steps, 0)
+
+    # Optional hard-case focus sampling (single_motor_random only).
+    # - plain focus mode: `phm_fault_focus_prob` is the probability of overriding
+    #   a fresh draw with manual/adaptive focus motors or pairs.
+    # - weighted pair mode: the same value becomes the mixing alpha between the
+    #   uniform pair distribution and the manual/adaptive target distribution.
+    # - phm_fault_focus_motor_ids / phm_fault_focus_pairs seed the manual focus set.
+    focus_prob_raw = getattr(cfg_obj, "phm_fault_focus_prob", 0.0)
+    try:
+        fault_focus_prob = float(focus_prob_raw)
+    except Exception:
+        if not _PHM_LOG_FLAGS["fault_focus_prob_invalid_warned"]:
+            logging.warning(
+                "[PHM] Invalid phm_fault_focus_prob='%s'. Using 0.0.",
+                focus_prob_raw,
+            )
+            _PHM_LOG_FLAGS["fault_focus_prob_invalid_warned"] = True
+        fault_focus_prob = 0.0
+    fault_focus_prob = max(0.0, min(1.0, fault_focus_prob))
+
+    focus_motor_ids_cfg = getattr(cfg_obj, "phm_fault_focus_motor_ids", ())
+    focus_pairs_cfg = getattr(cfg_obj, "phm_fault_focus_pairs", ())
+    pair_weighted_enable = bool(getattr(cfg_obj, "phm_fault_pair_weighted_enable", False))
+    pair_prob_floor_raw = getattr(cfg_obj, "phm_fault_pair_prob_floor", 0.0)
+    pair_prob_cap_raw = getattr(cfg_obj, "phm_fault_pair_prob_cap", 1.0)
+    pair_target_weights_raw = getattr(cfg_obj, "phm_fault_pair_target_weights", ())
+    pair_adaptive_enable = bool(getattr(cfg_obj, "phm_fault_pair_adaptive_enable", False))
+    pair_adaptive_mix_raw = getattr(cfg_obj, "phm_fault_pair_adaptive_mix", 1.0)
+    pair_adaptive_beta_raw = getattr(cfg_obj, "phm_fault_pair_adaptive_beta", 4.0)
+    pair_adaptive_ema_raw = getattr(cfg_obj, "phm_fault_pair_adaptive_ema", 0.9)
+    pair_adaptive_min_ep_raw = getattr(cfg_obj, "phm_fault_pair_adaptive_min_episode_per_pair", 20.0)
+    pair_adaptive_w_fail_raw = getattr(cfg_obj, "phm_fault_pair_adaptive_w_fail", 0.55)
+    pair_adaptive_w_sat_raw = getattr(cfg_obj, "phm_fault_pair_adaptive_w_sat", 0.30)
+    pair_adaptive_w_latch_raw = getattr(cfg_obj, "phm_fault_pair_adaptive_w_latch", 0.15)
+    pair_adaptive_sat_scale_raw = getattr(cfg_obj, "phm_fault_pair_adaptive_sat_scale", 1.0)
+    motor_adaptive_enable = bool(getattr(cfg_obj, "phm_fault_motor_adaptive_enable", False))
+    motor_adaptive_topk_raw = getattr(cfg_obj, "phm_fault_motor_adaptive_topk", 3)
+    motor_adaptive_min_ep_raw = getattr(cfg_obj, "phm_fault_motor_adaptive_min_episode_per_motor", 20.0)
+
+    try:
+        pair_prob_floor = float(pair_prob_floor_raw)
+    except Exception:
+        pair_prob_floor = 0.0
+    try:
+        pair_prob_cap = float(pair_prob_cap_raw)
+    except Exception:
+        pair_prob_cap = 1.0
+    pair_prob_floor = max(0.0, min(1.0, pair_prob_floor))
+    pair_prob_cap = max(0.0, min(1.0, pair_prob_cap))
+    if pair_prob_cap < pair_prob_floor:
+        if not _PHM_LOG_FLAGS["fault_pair_prob_range_invalid_warned"]:
+            logging.warning(
+                "[PHM] Invalid pair prob range floor=%.4f cap=%.4f; forcing cap=floor.",
+                pair_prob_floor,
+                pair_prob_cap,
+            )
+            _PHM_LOG_FLAGS["fault_pair_prob_range_invalid_warned"] = True
+        pair_prob_cap = pair_prob_floor
+    if pair_weighted_enable and not pair_uniform_enabled:
+        if not _PHM_LOG_FLAGS["fault_pair_weighted_requires_pair_uniform_warned"]:
+            logging.warning(
+                "[PHM] phm_fault_pair_weighted_enable=True requires phm_fault_pair_uniform_enable=True; "
+                "falling back to legacy sampler."
+            )
+            _PHM_LOG_FLAGS["fault_pair_weighted_requires_pair_uniform_warned"] = True
+        pair_weighted_enable = False
+    if pair_adaptive_enable and not pair_uniform_enabled:
+        if not _PHM_LOG_FLAGS["fault_pair_adaptive_requires_pair_uniform_warned"]:
+            logging.warning(
+                "[PHM] phm_fault_pair_adaptive_enable=True requires phm_fault_pair_uniform_enable=True; "
+                "adaptive pair sampler disabled."
+            )
+            _PHM_LOG_FLAGS["fault_pair_adaptive_requires_pair_uniform_warned"] = True
+        pair_adaptive_enable = False
+    if pair_adaptive_enable and not pair_weighted_enable:
+        if not _PHM_LOG_FLAGS["fault_pair_adaptive_requires_weighted_warned"]:
+            logging.warning(
+                "[PHM] phm_fault_pair_adaptive_enable=True requires phm_fault_pair_weighted_enable=True; "
+                "adaptive pair sampler disabled."
+            )
+            _PHM_LOG_FLAGS["fault_pair_adaptive_requires_weighted_warned"] = True
+        pair_adaptive_enable = False
+
+    try:
+        pair_adaptive_mix = float(pair_adaptive_mix_raw)
+    except Exception:
+        pair_adaptive_mix = 1.0
+    pair_adaptive_mix = max(0.0, min(1.0, pair_adaptive_mix))
+    try:
+        pair_adaptive_beta = float(pair_adaptive_beta_raw)
+    except Exception:
+        pair_adaptive_beta = 4.0
+    pair_adaptive_beta = max(0.0, pair_adaptive_beta)
+    try:
+        pair_adaptive_ema = float(pair_adaptive_ema_raw)
+    except Exception:
+        pair_adaptive_ema = 0.9
+    pair_adaptive_ema = max(0.0, min(0.999, pair_adaptive_ema))
+    try:
+        pair_adaptive_min_ep = float(pair_adaptive_min_ep_raw)
+    except Exception:
+        pair_adaptive_min_ep = 20.0
+    pair_adaptive_min_ep = max(1.0, pair_adaptive_min_ep)
+    try:
+        pair_adaptive_w_fail = float(pair_adaptive_w_fail_raw)
+    except Exception:
+        pair_adaptive_w_fail = 0.55
+    try:
+        pair_adaptive_w_sat = float(pair_adaptive_w_sat_raw)
+    except Exception:
+        pair_adaptive_w_sat = 0.30
+    try:
+        pair_adaptive_w_latch = float(pair_adaptive_w_latch_raw)
+    except Exception:
+        pair_adaptive_w_latch = 0.15
+    pair_adaptive_w_fail = max(0.0, pair_adaptive_w_fail)
+    pair_adaptive_w_sat = max(0.0, pair_adaptive_w_sat)
+    pair_adaptive_w_latch = max(0.0, pair_adaptive_w_latch)
+    try:
+        pair_adaptive_sat_scale = float(pair_adaptive_sat_scale_raw)
+    except Exception:
+        pair_adaptive_sat_scale = 1.0
+    pair_adaptive_sat_scale = max(1e-6, pair_adaptive_sat_scale)
+    try:
+        motor_adaptive_topk = int(motor_adaptive_topk_raw)
+    except Exception:
+        motor_adaptive_topk = 3
+    motor_adaptive_topk = max(1, min(NUM_MOTORS, motor_adaptive_topk))
+    try:
+        motor_adaptive_min_ep = float(motor_adaptive_min_ep_raw)
+    except Exception:
+        motor_adaptive_min_ep = 20.0
+    motor_adaptive_min_ep = max(1.0, motor_adaptive_min_ep)
+
+    def _compute_adaptive_motor_stats() -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            not hasattr(env, "_phm_fault_adapt_episode_counts")
+            or int(getattr(env._phm_fault_adapt_episode_counts, "numel", lambda: 0)()) != int(NUM_MOTORS)
+        ):
+            env._phm_fault_adapt_episode_counts = torch.zeros((NUM_MOTORS,), device=device, dtype=torch.float32)
+        if (
+            not hasattr(env, "_phm_fault_adapt_fail_counts")
+            or int(getattr(env._phm_fault_adapt_fail_counts, "numel", lambda: 0)()) != int(NUM_MOTORS)
+        ):
+            env._phm_fault_adapt_fail_counts = torch.zeros((NUM_MOTORS,), device=device, dtype=torch.float32)
+        if (
+            not hasattr(env, "_phm_fault_adapt_sat_sum")
+            or int(getattr(env._phm_fault_adapt_sat_sum, "numel", lambda: 0)()) != int(NUM_MOTORS)
+        ):
+            env._phm_fault_adapt_sat_sum = torch.zeros((NUM_MOTORS,), device=device, dtype=torch.float32)
+        if (
+            not hasattr(env, "_phm_fault_adapt_latch_sum")
+            or int(getattr(env._phm_fault_adapt_latch_sum, "numel", lambda: 0)()) != int(NUM_MOTORS)
+        ):
+            env._phm_fault_adapt_latch_sum = torch.zeros((NUM_MOTORS,), device=device, dtype=torch.float32)
+
+        valid_prev = (prev_fault_motor_id >= 0) & (prev_fault_motor_id < NUM_MOTORS)
+        if torch.any(valid_prev):
+            prev_motor_valid = prev_fault_motor_id[valid_prev]
+            ep_add = torch.bincount(prev_motor_valid, minlength=NUM_MOTORS).to(torch.float32)
+            env._phm_fault_adapt_episode_counts += ep_add
+
+            fail_mask = valid_prev & (~prev_time_out_mask)
+            if torch.any(fail_mask):
+                fail_add = torch.bincount(prev_fault_motor_id[fail_mask], minlength=NUM_MOTORS).to(torch.float32)
+                env._phm_fault_adapt_fail_counts += fail_add
+
+            sat_acc = torch.zeros((NUM_MOTORS,), device=device, dtype=torch.float32)
+            sat_acc.index_add_(0, prev_motor_valid, torch.clamp(prev_sat_ratio[valid_prev], min=0.0))
+            env._phm_fault_adapt_sat_sum += sat_acc
+
+            latch_acc = torch.zeros((NUM_MOTORS,), device=device, dtype=torch.float32)
+            latch_acc.index_add_(0, prev_motor_valid, torch.clamp(prev_latched_flag[valid_prev], min=0.0))
+            env._phm_fault_adapt_latch_sum += latch_acc
+
+        motor_ep = torch.clamp(env._phm_fault_adapt_episode_counts.to(torch.float32), min=1.0)
+        fail_rate = torch.clamp(env._phm_fault_adapt_fail_counts.to(torch.float32) / motor_ep, min=0.0, max=1.0)
+        sat_mean = torch.clamp(env._phm_fault_adapt_sat_sum.to(torch.float32) / motor_ep, min=0.0)
+        sat_norm = torch.clamp(sat_mean / float(pair_adaptive_sat_scale), min=0.0, max=1.0)
+        latch_mean = torch.clamp(env._phm_fault_adapt_latch_sum.to(torch.float32) / motor_ep, min=0.0, max=1.0)
+        motor_scores = (
+            float(pair_adaptive_w_fail) * fail_rate
+            + float(pair_adaptive_w_sat) * sat_norm
+            + float(pair_adaptive_w_latch) * latch_mean
+        )
+        motor_conf = torch.clamp(
+            env._phm_fault_adapt_episode_counts.to(torch.float32) / float(motor_adaptive_min_ep),
+            min=0.0,
+            max=1.0,
+        )
+        return motor_scores, motor_conf
+
+    focus_motor_ids_set: set[int] = set()
+
+    def _append_focus_motor_id(x):
+        try:
+            v = int(x)
+        except Exception:
+            return
+        if 0 <= v < NUM_MOTORS:
+            focus_motor_ids_set.add(v)
+        else:
+            if not _PHM_LOG_FLAGS["fault_focus_invalid_entry_warned"]:
+                logging.warning(
+                    "[PHM] Ignoring out-of-range focus motor id=%s (valid: 0..%s).",
+                    v,
+                    NUM_MOTORS - 1,
+                )
+                _PHM_LOG_FLAGS["fault_focus_invalid_entry_warned"] = True
+
+    def _consume_focus_ids(raw_ids):
+        if isinstance(raw_ids, str):
+            # Accept CSV-like strings: "7,10"
+            parts = [p.strip() for p in raw_ids.replace(";", ",").split(",") if p.strip() != ""]
+            for p in parts:
+                _append_focus_motor_id(p)
+            return
+        if isinstance(raw_ids, (list, tuple, set)):
+            for item in raw_ids:
+                _append_focus_motor_id(item)
+
+    def _consume_focus_pairs(raw_pairs):
+        if isinstance(raw_pairs, (list, tuple, set)):
+            for pair in raw_pairs:
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    continue
+                _append_focus_motor_id(pair[0])
+                _append_focus_motor_id(pair[1])
+
+    _consume_focus_ids(focus_motor_ids_cfg)
+    _consume_focus_pairs(focus_pairs_cfg)
+
+    focus_motor_ids_sorted = sorted(list(focus_motor_ids_set))
+    if len(focus_motor_ids_sorted) > 0:
+        fault_focus_motor_choices = torch.as_tensor(focus_motor_ids_sorted, device=device, dtype=torch.long)
+    else:
+        fault_focus_motor_choices = torch.empty((0,), device=device, dtype=torch.long)
+
+    if pair_uniform_enabled and NUM_MOTORS == 12 and len(focus_motor_ids_sorted) > 0:
+        focus_pair_idx_list = [
+            i for i, p in enumerate(_FAULT_MIRROR_PAIRS_12) if int(p[0]) in focus_motor_ids_set or int(p[1]) in focus_motor_ids_set
+        ]
+        fault_focus_pair_indices = torch.as_tensor(focus_pair_idx_list, device=device, dtype=torch.long)
+    else:
+        fault_focus_pair_indices = torch.empty((0,), device=device, dtype=torch.long)
+    adaptive_focus_motor_choices = torch.empty((0,), device=device, dtype=torch.long)
+    adaptive_focus_motor_target_probs = torch.zeros((NUM_MOTORS,), device=device, dtype=torch.float32)
+    adaptive_motor_scores = None
+    adaptive_motor_conf = None
+
+    mirror_pairs = None
+    num_pairs = 0
+    pair_uniform_probs = None
+    pair_target_probs = None
+    pair_target_weights_has_custom = False
+    if pair_uniform_enabled and NUM_MOTORS == 12:
+        mirror_pairs = torch.as_tensor(_FAULT_MIRROR_PAIRS_12, device=device, dtype=torch.long)
+        num_pairs = int(mirror_pairs.shape[0])
+        pair_uniform_probs = torch.full((num_pairs,), 1.0 / float(num_pairs), device=device, dtype=torch.float32)
+        pair_target_probs = pair_uniform_probs.clone()
+
+        # Parse optional target pair weights (order: _FAULT_MIRROR_PAIRS_12).
+        pair_target_weight_list: list[float] = []
+        if isinstance(pair_target_weights_raw, str):
+            raw_vals = [
+                p.strip()
+                for p in pair_target_weights_raw.replace(";", ",").split(",")
+                if p.strip() != ""
+            ]
+            for item in raw_vals:
+                try:
+                    pair_target_weight_list.append(float(item))
+                except Exception:
+                    pair_target_weight_list = []
+                    break
+        elif isinstance(pair_target_weights_raw, (list, tuple)):
+            try:
+                pair_target_weight_list = [float(x) for x in pair_target_weights_raw]
+            except Exception:
+                pair_target_weight_list = []
+
+        if len(pair_target_weight_list) > 0:
+            if len(pair_target_weight_list) != num_pairs or any(v < 0.0 for v in pair_target_weight_list) or sum(pair_target_weight_list) <= 0.0:
+                if not _PHM_LOG_FLAGS["fault_pair_target_weights_invalid_warned"]:
+                    logging.warning(
+                        "[PHM] Invalid phm_fault_pair_target_weights=%s. Expected %d non-negative values with positive sum.",
+                        pair_target_weights_raw,
+                        num_pairs,
+                    )
+                    _PHM_LOG_FLAGS["fault_pair_target_weights_invalid_warned"] = True
+            else:
+                pair_target_probs = torch.as_tensor(pair_target_weight_list, device=device, dtype=torch.float32)
+                pair_target_probs = pair_target_probs / torch.clamp(torch.sum(pair_target_probs), min=1e-8)
+                pair_target_weights_has_custom = True
+
+        # Fallback target distribution from focus pair selector when explicit target weights are absent.
+        if not pair_target_weights_has_custom and int(fault_focus_pair_indices.numel()) > 0:
+            pair_target_probs.zero_()
+            pair_target_probs[fault_focus_pair_indices] = 1.0
+            pair_target_probs = pair_target_probs / torch.clamp(torch.sum(pair_target_probs), min=1e-8)
+
+        # Keep floor/cap feasible; if impossible, relax to uniform-safe defaults.
+        if float(pair_prob_floor) * float(num_pairs) > 1.0:
+            if not _PHM_LOG_FLAGS["fault_pair_prob_range_invalid_warned"]:
+                logging.warning(
+                    "[PHM] phm_fault_pair_prob_floor=%.4f is infeasible for %d pairs; clamping to uniform %.4f.",
+                    pair_prob_floor,
+                    num_pairs,
+                    1.0 / float(num_pairs),
+                )
+                _PHM_LOG_FLAGS["fault_pair_prob_range_invalid_warned"] = True
+            pair_prob_floor = 1.0 / float(num_pairs)
+        if float(pair_prob_cap) * float(num_pairs) < 1.0:
+            if not _PHM_LOG_FLAGS["fault_pair_prob_range_invalid_warned"]:
+                logging.warning(
+                    "[PHM] phm_fault_pair_prob_cap=%.4f is infeasible for %d pairs; clamping to uniform %.4f.",
+                    pair_prob_cap,
+                    num_pairs,
+                    1.0 / float(num_pairs),
+                )
+                _PHM_LOG_FLAGS["fault_pair_prob_range_invalid_warned"] = True
+            pair_prob_cap = 1.0 / float(num_pairs)
+
+        if pair_weighted_enable:
+            # Cache static target/uniform diagnostics for tensorboard logging.
+            env._phm_fault_pair_target_probs = pair_target_probs.clone()
+            env._phm_fault_pair_uniform_probs = pair_uniform_probs.clone()
+
+    if pair_adaptive_enable or motor_adaptive_enable:
+        adaptive_motor_scores, adaptive_motor_conf = _compute_adaptive_motor_stats()
+        env._phm_fault_adaptive_motor_scores = adaptive_motor_scores.clone()
+        env._phm_fault_adaptive_motor_confidence = adaptive_motor_conf.clone()
+
+        if motor_adaptive_enable:
+            motor_rank_scores = adaptive_motor_scores * adaptive_motor_conf
+            positive_mask = motor_rank_scores > 1e-8
+            positive_count = int(torch.sum(positive_mask).item())
+            if positive_count > 0:
+                topk = min(int(motor_adaptive_topk), positive_count)
+                adaptive_focus_motor_choices = torch.topk(
+                    motor_rank_scores, k=topk, largest=True, sorted=True
+                ).indices.to(torch.long)
+                adaptive_focus_motor_target_probs.zero_()
+                adaptive_focus_motor_target_probs[adaptive_focus_motor_choices] = 1.0 / float(topk)
+            env._phm_fault_motor_adaptive_enabled = torch.tensor(1.0, device=device, dtype=torch.float32)
+            env._phm_fault_motor_adaptive_topk = torch.tensor(
+                float(motor_adaptive_topk), device=device, dtype=torch.float32
+            )
+            env._phm_fault_motor_adaptive_target_probs = adaptive_focus_motor_target_probs.clone()
+
+        if pair_uniform_enabled and NUM_MOTORS == 12 and pair_adaptive_enable:
+            pair_scores = 0.5 * (
+                adaptive_motor_scores[mirror_pairs[:, 0]] + adaptive_motor_scores[mirror_pairs[:, 1]]
+            )
+            pair_ep = env._phm_fault_adapt_episode_counts[mirror_pairs[:, 0]] + env._phm_fault_adapt_episode_counts[
+                mirror_pairs[:, 1]
+            ]
+            pair_conf = torch.clamp(pair_ep.to(torch.float32) / float(pair_adaptive_min_ep), min=0.0, max=1.0)
+            pair_scores = pair_scores * pair_conf
+
+            centered = pair_scores - torch.mean(pair_scores)
+            adaptive_probs = torch.softmax(centered * float(pair_adaptive_beta), dim=0)
+            adaptive_probs = adaptive_probs / torch.clamp(torch.sum(adaptive_probs), min=1e-8)
+
+            if (
+                not hasattr(env, "_phm_fault_pair_adaptive_probs_ema")
+                or int(getattr(env._phm_fault_pair_adaptive_probs_ema, "numel", lambda: 0)()) != int(num_pairs)
+            ):
+                env._phm_fault_pair_adaptive_probs_ema = adaptive_probs.clone()
+            else:
+                env._phm_fault_pair_adaptive_probs_ema = (
+                    float(pair_adaptive_ema) * env._phm_fault_pair_adaptive_probs_ema.to(torch.float32)
+                    + (1.0 - float(pair_adaptive_ema)) * adaptive_probs
+                )
+            adaptive_probs_smoothed = env._phm_fault_pair_adaptive_probs_ema
+            adaptive_probs_smoothed = adaptive_probs_smoothed / torch.clamp(
+                torch.sum(adaptive_probs_smoothed), min=1e-8
+            )
+
+            pair_target_probs = (
+                (1.0 - float(pair_adaptive_mix)) * pair_target_probs
+                + float(pair_adaptive_mix) * adaptive_probs_smoothed
+            )
+            pair_target_probs = pair_target_probs / torch.clamp(torch.sum(pair_target_probs), min=1e-8)
+
+            # Diagnostics for tensorboard / log consumers.
+            env._phm_fault_pair_adaptive_enabled = torch.tensor(1.0, device=device, dtype=torch.float32)
+            env._phm_fault_pair_adaptive_mix = torch.tensor(float(pair_adaptive_mix), device=device, dtype=torch.float32)
+            env._phm_fault_pair_adaptive_scores = pair_scores.clone()
+            env._phm_fault_pair_adaptive_confidence = pair_conf.clone()
+            env._phm_fault_pair_adaptive_target_probs = adaptive_probs_smoothed.clone()
+            env._phm_fault_pair_adaptive_motor_scores = adaptive_motor_scores.clone()
+            env._phm_fault_pair_target_probs = pair_target_probs.clone()
+
+    focus_available = (
+        int(fault_focus_motor_choices.numel()) > 0
+        or int(adaptive_focus_motor_choices.numel()) > 0
+        or bool(pair_target_weights_has_custom)
+        or bool(pair_adaptive_enable)
+    )
+    if fault_focus_prob > 0.0 and not focus_available:
+        if not _PHM_LOG_FLAGS["fault_focus_empty_warned"]:
+            logging.warning(
+                "[PHM] phm_fault_focus_prob=%.3f but no valid focus motors found. "
+                "Focus sampling disabled.",
+                fault_focus_prob,
+            )
+            _PHM_LOG_FLAGS["fault_focus_empty_warned"] = True
+        fault_focus_prob = 0.0
+
     if not hasattr(env, "_phm_fault_hold_motor_id") or int(getattr(env._phm_fault_hold_motor_id, "numel", lambda: 0)()) != int(env.num_envs):
         env._phm_fault_hold_motor_id = torch.full((env.num_envs,), -1, device=device, dtype=torch.long)
     if not hasattr(env, "_phm_fault_hold_until_step") or int(getattr(env._phm_fault_hold_until_step, "numel", lambda: 0)()) != int(env.num_envs):
         env._phm_fault_hold_until_step = torch.zeros((env.num_envs,), device=device, dtype=torch.long)
+    # Cumulative fault sampling diagnostics (for train-time exposure verification).
+    if not hasattr(env, "_phm_fault_episode_counts") or int(getattr(env._phm_fault_episode_counts, "numel", lambda: 0)()) != int(NUM_MOTORS):
+        env._phm_fault_episode_counts = torch.zeros((NUM_MOTORS,), device=device, dtype=torch.float32)
+    if not hasattr(env, "_phm_fault_episode_total"):
+        env._phm_fault_episode_total = torch.tensor(0.0, device=device, dtype=torch.float32)
+    if not hasattr(env, "_phm_fault_focus_draw_count"):
+        env._phm_fault_focus_draw_count = torch.tensor(0.0, device=device, dtype=torch.float32)
+    if not hasattr(env, "_phm_fault_focus_draw_total"):
+        env._phm_fault_focus_draw_total = torch.tensor(0.0, device=device, dtype=torch.float32)
+    if pair_uniform_enabled and pair_weighted_enable and pair_uniform_probs is not None:
+        env._phm_fault_pair_sampling_probs = pair_uniform_probs.clone()
+        env._phm_fault_pair_sampling_alpha = torch.tensor(
+            float(max(0.0, min(1.0, fault_focus_prob))), device=device, dtype=torch.float32
+        )
     if fault_mode != "single_motor_random" or fault_hold_steps <= 0:
         env._phm_fault_hold_motor_id[env_ids] = -1
         env._phm_fault_hold_until_step[env_ids] = 0
@@ -1089,6 +1601,23 @@ def reset_phm_interface(env: ManagerBasedRLEnv, env_ids: torch.Tensor):
         env.phm_state.motor_case_temp[ids] = case_temp
         if hasattr(env.phm_state, "case_temp"):
             env.phm_state.case_temp[ids] = case_temp
+
+    def _build_pair_sampling_probs() -> tuple[torch.Tensor, float]:
+        """Build per-pair sampling probabilities using uniform/target mixing + floor/cap."""
+        if pair_uniform_probs is None:
+            return torch.empty((0,), device=device, dtype=torch.float32), 0.0
+        if not pair_weighted_enable:
+            return pair_uniform_probs.clone(), 0.0
+
+        alpha = max(0.0, min(1.0, float(fault_focus_prob)))
+        mixed = (1.0 - alpha) * pair_uniform_probs + alpha * pair_target_probs
+        mixed = torch.clamp(mixed, min=float(pair_prob_floor), max=float(pair_prob_cap))
+        total = torch.sum(mixed)
+        if float(total.item()) <= 1e-8:
+            mixed = pair_uniform_probs.clone()
+        else:
+            mixed = mixed / total
+        return mixed, alpha
 
     def _sample_fault_profile(
         ids: torch.Tensor,
@@ -1135,15 +1664,59 @@ def reset_phm_interface(env: ManagerBasedRLEnv, env_ids: torch.Tensor):
 
             sample_mask = ~reuse_mask
             sample_count = int(torch.sum(sample_mask).item())
+            n_focus_draw = 0
             if sample_count > 0:
                 if pair_uniform_enabled:
-                    mirror_pairs = torch.as_tensor(_FAULT_MIRROR_PAIRS_12, device=device, dtype=torch.long)
-                    pair_idx = torch.randint(0, int(mirror_pairs.shape[0]), (sample_count,), device=device)
+                    if pair_weighted_enable:
+                        pair_probs, alpha = _build_pair_sampling_probs()
+                        pair_idx = torch.multinomial(pair_probs, num_samples=sample_count, replacement=True)
+                        if int(fault_focus_pair_indices.numel()) > 0:
+                            n_focus_draw = int(torch.sum(torch.isin(pair_idx, fault_focus_pair_indices)).item())
+                        else:
+                            n_focus_draw = int(round(float(alpha) * float(sample_count)))
+                        # Export the active pair distribution for diagnostics.
+                        env._phm_fault_pair_sampling_probs = pair_probs.clone()
+                        env._phm_fault_pair_sampling_alpha = torch.tensor(
+                            float(alpha), device=device, dtype=torch.float32
+                        )
+                    else:
+                        pair_idx = torch.randint(0, int(mirror_pairs.shape[0]), (sample_count,), device=device)
+                        if fault_focus_prob > 0.0 and int(fault_focus_pair_indices.numel()) > 0:
+                            focus_draw = torch.rand((sample_count,), device=device) < float(fault_focus_prob)
+                            n_focus = int(torch.sum(focus_draw).item())
+                            n_focus_draw = n_focus
+                            if n_focus > 0:
+                                focus_ids = fault_focus_pair_indices[
+                                    torch.randint(0, int(fault_focus_pair_indices.numel()), (n_focus,), device=device)
+                                ]
+                                pair_idx[focus_draw] = focus_ids
                     side_idx = torch.randint(0, 2, (sample_count,), device=device)
                     sampled_motor = mirror_pairs[pair_idx, side_idx]
                 else:
                     sampled_motor = torch.randint(0, NUM_MOTORS, (sample_count,), device=device, dtype=torch.long)
+                    if fault_focus_prob > 0.0 and int(fault_focus_motor_choices.numel()) > 0:
+                        focus_draw = torch.rand((sample_count,), device=device) < float(fault_focus_prob)
+                        n_focus = int(torch.sum(focus_draw).item())
+                        n_focus_draw = n_focus
+                        if n_focus > 0:
+                            sampled_focus = fault_focus_motor_choices[
+                                torch.randint(0, int(fault_focus_motor_choices.numel()), (n_focus,), device=device)
+                            ]
+                            sampled_motor[focus_draw] = sampled_focus
+                if fault_focus_prob > 0.0 and int(adaptive_focus_motor_choices.numel()) > 0:
+                    focus_draw = torch.rand((sample_count,), device=device) < float(fault_focus_prob)
+                    n_focus = int(torch.sum(focus_draw).item())
+                    n_focus_draw = n_focus
+                    if n_focus > 0:
+                        sampled_focus = adaptive_focus_motor_choices[
+                            torch.randint(0, int(adaptive_focus_motor_choices.numel()), (n_focus,), device=device)
+                        ]
+                        sampled_motor[focus_draw] = sampled_focus
                 motor_idx[sample_mask] = sampled_motor
+                # Count only newly sampled resets (held envs are not fresh draws).
+                if fault_focus_prob > 0.0 and focus_available:
+                    env._phm_fault_focus_draw_count += float(n_focus_draw)
+                    env._phm_fault_focus_draw_total += float(sample_count)
 
             # Update/refresh hold window for all just-reset environments.
             if fault_hold_steps > 0:
@@ -1155,6 +1728,11 @@ def reset_phm_interface(env: ManagerBasedRLEnv, env_ids: torch.Tensor):
         else:
             motor_idx = torch.randint(0, NUM_MOTORS, (n,), device=device, dtype=torch.long)
         row_idx = torch.arange(n, device=device, dtype=torch.long)
+        # Episode-level fault motor exposure counter (reset-time draws).
+        if motor_idx.numel() > 0:
+            binc = torch.bincount(motor_idx, minlength=NUM_MOTORS).to(torch.float32)
+            env._phm_fault_episode_counts += binc
+            env._phm_fault_episode_total += float(motor_idx.numel())
 
         sampled_fatigue = torch.rand((n,), device=device) * (fatigue_high - fatigue_low) + fatigue_low
         sampled_margin = torch.rand((n,), device=device) * (margin_high - margin_low) + margin_low
@@ -1235,22 +1813,18 @@ def reset_phm_interface(env: ManagerBasedRLEnv, env_ids: torch.Tensor):
     crit_coil_min = 65.0
     crit_coil_max = 85.0
     try:
-        term_cfg = getattr(getattr(env, "cfg", None), "terminations", None)
-        thermal_term = getattr(term_cfg, "thermal_failure", None) if term_cfg is not None else None
-        thermal_params = getattr(thermal_term, "params", {}) if thermal_term is not None else {}
-        if isinstance(thermal_params, dict) and bool(thermal_params.get("use_case_proxy", False)):
-            threshold_temp = float(thermal_params.get("threshold_temp", 72.0))
-            coil_to_case_delta = float(thermal_params.get("coil_to_case_delta_c", 5.0))
-            # Critical scenario uses _set_case_from_coil(..., delta_low=3.5, delta_high=8.0).
-            # To avoid immediate thermal termination right after reset, enforce:
-            #   coil_max - delta_low <= threshold - margin
-            # -> coil_max <= threshold + delta_low - margin
-            case_delta_low = 3.5
-            immediate_term_margin_c = 0.5
-            safe_coil_max_from_case = threshold_temp + case_delta_low - immediate_term_margin_c
-            crit_coil_max = max(
-                T_AMB + 8.0,
-                min(threshold_temp + coil_to_case_delta - 1.0, safe_coil_max_from_case),
+        threshold_temp, use_case_proxy, coil_to_case_delta = thermal_termination_params_from_cfg(
+            getattr(env, "cfg", None)
+        )
+        if use_case_proxy and threshold_temp is not None:
+            crit_coil_max = case_proxy_safe_coil_max_for_reset(
+                threshold_temp=threshold_temp,
+                coil_to_case_delta_c=coil_to_case_delta,
+                case_delta_low_c=3.5,
+                immediate_term_margin_c=0.5,
+                proxy_margin_c=1.0,
+                ambient_temp_c=T_AMB,
+                min_coil_above_ambient_c=8.0,
             )
             crit_coil_min = max(T_AMB + 5.0, crit_coil_max - 10.0)
     except Exception as err:

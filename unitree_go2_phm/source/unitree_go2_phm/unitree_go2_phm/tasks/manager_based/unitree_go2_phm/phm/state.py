@@ -1,6 +1,6 @@
 # =============================================================================
 # unitree_go2_phm/phm/state.py
-# [Audit Status]: FINALIZED (SysID Memory & Velocity Noise Added)
+# Runtime PHM state container shared across resets, observations, and rewards.
 # =============================================================================
 from __future__ import annotations
 import torch
@@ -78,8 +78,8 @@ class PHMState:
         self.encoder_offset = torch.zeros((num_envs, num_joints), device=device, dtype=torch.float32)
         # 위치 노이즈
         self.encoder_noise = torch.zeros((num_envs, num_joints), device=device, dtype=torch.float32)
-        # [AUDIT FIX] 속도 노이즈 추가 (Velocity Noise Injection)
-        # 실제 로봇에서는 미분 노이즈가 위치 노이즈보다 훨씬 심하므로 필수적임.
+        # 속도 미분 기반 측정 채널용 노이즈.
+        # 실제 로봇에서는 속도 추정 노이즈가 위치 노이즈보다 더 크게 나타날 수 있다.
         self.encoder_vel_noise = torch.zeros((num_envs, num_joints), device=device, dtype=torch.float32)
         # Sample-and-hold measurement channels (for sensor latency/drop modeling).
         self.encoder_meas_pos = torch.zeros((num_envs, num_joints), device=device, dtype=torch.float32)
@@ -103,7 +103,7 @@ class PHMState:
         self.base_friction_torque = torch.full((num_envs, num_joints), 0.2, device=device, dtype=torch.float32)
 
         # ---------------------------------------------------------------------
-        # [Priority 4] Strategic Gambler & SysID Memory
+        # 8. Bias, brownout, and latent-state memory
         # ---------------------------------------------------------------------
         
         # (A) Systematic Bias
@@ -112,7 +112,7 @@ class PHMState:
 
         # (B) Brownout Control State
         self.brownout_scale = torch.ones((num_envs,), device=device, dtype=torch.float32)
-        # [Fix #8] Cached BMS predicted voltage for strategic observation paths.
+        # [Fix #8] Cached BMS predicted voltage for latent observation paths.
         # Brownout logic may use this or measured channels depending on env config.
         self.bms_voltage_pred = torch.full((num_envs,), 33.6, device=device, dtype=torch.float32)
         
@@ -183,7 +183,7 @@ class PHMState:
         # [Fix] base_friction_torque를 nominal 값(STICTION_NOMINAL=0.2)으로 리셋
         self.base_friction_torque[env_ids] = 0.2
         
-        # 2. [Strategic Gambler] 상태 리셋
+        # 2. Bias / brownout memory reset
         self.friction_bias[env_ids] = 1.0
         self.voltage_sensor_bias[env_ids] = 0.0
         

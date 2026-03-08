@@ -32,7 +32,7 @@ def _clamp(x: float, lo: float, hi: float) -> float:
 class _FallbackGovernorConfig:
     temp_warn_c: float = 65.0
     temp_crit_c: float = 70.0
-    temp_stop_c: float = 72.0
+    temp_stop_c: float = 75.0
     cell_warn_v: float = 3.20
     cell_scale_stop_v: float = 3.05
     cell_hard_stop_v: float = 3.00
@@ -133,7 +133,7 @@ def main() -> int:
     parser.add_argument("--governor", action="store_true", default=False)
     parser.add_argument("--temp_warn_c", type=float, default=65.0)
     parser.add_argument("--temp_crit_c", type=float, default=70.0)
-    parser.add_argument("--temp_stop_c", type=float, default=72.0)
+    parser.add_argument("--temp_stop_c", type=float, default=75.0)
     parser.add_argument("--cell_warn_v", type=float, default=3.20)
     parser.add_argument("--cell_stop_v", type=float, default=3.05)
     parser.add_argument("--cell_hard_v", type=float, default=3.00)

@@ -1,11 +1,8 @@
 # unitree_go2_phm/mdp/observations/imu.py
-
-# =============================================================================
-# [PHM-Focused Observation Layer]
-# [System Integration v2.2 - Sensor Drift Added]
-# - Feature: Temperature-Induced IMU Drift (Bias shifts with heat)
-# - Core Logic: Uses 'phm.utils.compute_kinematic_accel' for Consistency
-# =============================================================================
+#
+# IMU observation helpers with optional PHM-aware drift modeling.
+# Angular velocity and linear acceleration channels can inject
+# temperature-conditioned bias while reusing shared kinematic helpers.
 from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
@@ -16,7 +13,6 @@ from isaaclab.sensors import Imu
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
-    # [Audit Fix] Correct Class Name for Isaac Lab 2.3.1
 
 # [Architecture] Import Core Constants & Utils
 from ...phm.utils import compute_kinematic_accel
@@ -40,7 +36,7 @@ def base_ang_vel_phm(
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("base_imu")
 ) -> torch.Tensor:
     """[Sim-to-Real] 로봇 바디 프레임 기준 각속도 (Gyroscope)."""
-    # [Audit Fix 1] Imu class usage
+    # Isaac Lab IMU sensor lookup.
     sensor: Imu = env.scene.sensors.get(sensor_cfg.name)
     if sensor is None:
         raise ValueError(f"[Config Error] Imu sensor '{sensor_cfg.name}' missing.")

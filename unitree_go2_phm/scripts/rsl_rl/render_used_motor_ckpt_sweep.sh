@@ -11,7 +11,7 @@ if [[ ! -f "$CONDA_SH" ]]; then
 fi
 source "$CONDA_SH"
 conda activate "$CONDA_ENV"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 # Defaults (can be overridden by env vars)
 TASK="${TASK:-Unitree-Go2-RealObs-v1}"

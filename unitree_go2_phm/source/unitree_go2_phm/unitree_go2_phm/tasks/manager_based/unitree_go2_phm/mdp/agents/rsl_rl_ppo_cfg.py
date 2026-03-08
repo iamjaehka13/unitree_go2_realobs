@@ -1,6 +1,6 @@
 # =============================================================================
 # unitree_go2_phm/mdp/agents/rsl_rl_ppo_cfg.py
-# [Audit Status]: FINALIZED (Memory Enabled & Capacity Upgraded)
+# PPO runner defaults for the Go2 PHM locomotion tasks.
 # =============================================================================
 from isaaclab.utils import configclass
 
@@ -9,14 +9,7 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 @configclass
 class UnitreeGo2PhmPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """
-    [Strategic Gambler PPO Configuration]
-    
-    Key Updates:
-    1. Observation History: Enabled (Length=5) for Implicit SysID.
-    2. Network Capacity: Increased to [512, 256, 128] for complex PHM logic.
-    3. Learning Steps: Adjusted for locomotion tasks.
-    """
+    """PPO runner defaults for the Go2 PHM locomotion tasks."""
     # Literature-aligned PPO defaults (2109.11978 + legged_gym convention).
     num_steps_per_env = 24
     # 5000 iters: 3000까지 ramp + 3001~5000 hold 안정화.
@@ -48,7 +41,7 @@ class UnitreeGo2PhmPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     obs_groups = {"policy": ["policy"], "critic": ["critic"]}
     
     # ---------------------------------------------------------------------
-    # [Priority 4] Memory Activation (Crucial for SysID)
+    # Observation history for implicit system identification
     # ---------------------------------------------------------------------
     # 에이전트가 과거 5스텝의 관측값을 함께 봅니다.
     # 이를 통해 Friction Bias나 Voltage Sag의 추세를 진단할 수 있습니다.
@@ -59,7 +52,7 @@ class UnitreeGo2PhmPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         init_noise_std=1.0,
         actor_obs_normalization=False,
         critic_obs_normalization=False,
-        # [Audit Fix] 복잡한 PHM 전략 학습을 위해 네트워크 용량 증설
+        # 복잡한 PHM 제어/진단 신호를 다루기 위해 기본 네트워크 용량을 확장.
         # 기존 [32, 32]는 Cartpole용이므로 Quadruped에 맞게 확장
         actor_hidden_dims=[512, 256, 128],
         critic_hidden_dims=[512, 256, 128],

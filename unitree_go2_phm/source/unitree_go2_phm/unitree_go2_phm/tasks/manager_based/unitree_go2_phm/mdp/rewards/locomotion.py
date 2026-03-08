@@ -1,6 +1,6 @@
 # =============================================================================
 # unitree_go2_phm/mdp/rewards/locomotion.py
-# [Audit Status]: BACK TO FORCE_MATRIX_W (Filters Restored)
+# Locomotion reward helpers for velocity tracking, gait quality, and terrain fit.
 # =============================================================================
 
 from __future__ import annotations

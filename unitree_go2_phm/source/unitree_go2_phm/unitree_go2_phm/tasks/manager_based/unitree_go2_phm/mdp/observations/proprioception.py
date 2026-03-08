@@ -1,11 +1,8 @@
 # unitree_go2_phm/mdp/observations/proprioception.py
-
-# =============================================================================
-# [Proprioception Layer for PHM]
-# [System Integration v3.2 - Velocity Noise Added]
-# - Core Fix: Joint Velocity now includes 'encoder_vel_noise' from PHMState.
-# - Rationale: Ensures Actuator and Policy see the EXACT same sensor data.
-# =============================================================================
+#
+# PHM-enhanced proprioceptive observation helpers.
+# Joint velocity channels reuse the same measurement noise cached in `PHMState`
+# so the actuator path and the policy observe the same corrupted sensor stream.
 
 from __future__ import annotations
 import torch
@@ -79,7 +76,7 @@ def joint_vel_phm(env: ManagerBasedRLEnv, env_ids: torch.Tensor | slice = slice(
     """
     [PHM Enhanced] 관절 각속도 (Normalized).
     
-    [AUDIT FIX] SSOT: Actuator와 동일한 속도 노이즈(D-term Noise) 적용.
+    Actuator와 동일한 속도 노이즈(D-term noise)를 적용하는 SSOT 경로.
     """
     asset = env.scene[asset_cfg.name]
     joint_ids = asset_cfg.joint_ids

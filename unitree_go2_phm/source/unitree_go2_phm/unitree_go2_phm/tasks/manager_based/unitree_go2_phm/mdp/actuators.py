@@ -7,7 +7,7 @@ from isaaclab.assets import Articulation
 from isaaclab.utils.types import ArticulationActions
 
 if TYPE_CHECKING:
-    from ...phm.state import PHMState
+    from ..phm.state import PHMState
 
 class PhmRealismActuator(ImplicitActuator):
     

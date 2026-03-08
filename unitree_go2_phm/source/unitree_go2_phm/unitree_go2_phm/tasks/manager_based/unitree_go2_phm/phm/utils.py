@@ -1,12 +1,6 @@
 # =============================================================================
 # unitree_go2_phm/phm/utils.py
-# =============================================================================
-# [System Core] Shared Physics, Math & Lifecycle Utilities (v5.5 - Full Version)
-#
-# Updates (2026-01-24):
-# 1. [Gravity Fix] Gravity Cancellation via projected_gravity_b (SSOT compliant).
-# 2. [Stability] Voltage Sag Limiter to prevent simulation explosion.
-# 3. [API Standard] Isaac Lab 2.1/2.3.1 Imu sensor data structure alignment.
+# Shared physics, math, and lifecycle helpers used across PHM modules.
 # =============================================================================
 from __future__ import annotations
 import torch
@@ -19,7 +13,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.assets import Articulation
 from isaaclab.envs import ManagerBasedEnv
 
-# [Consistency] Import Constants
+# Shared constants import with conservative fallbacks for isolated execution.
 try:
     from .constants import (
         # Electrical & Mechanical
@@ -86,7 +80,7 @@ def compute_battery_voltage(
     discharge_current = torch.clamp(current_est, min=0.0)
     v_drop = discharge_current * internal_resistance
     
-    # [CRITICAL] Voltage Sag Limiter: 전압 급락 방지
+    # Voltage sag limiter to prevent unrealistic pack collapse.
     max_allowed_drop = v_open * max_sag_ratio
     v_drop_clamped = torch.min(v_drop, max_allowed_drop)
 
@@ -127,8 +121,8 @@ def compute_component_losses(
     p_inverter = (R_MOSFET * torch.square(current_est)) + (V_DROP * current_est)
 
     # 3. Mechanical Loss (Viscous + Core + Stiction)
-    # [Fix] Core loss(히스테리시스+와전류)는 모터 측 각속도에서 발생.
-    # joint velocity가 아닌 motor velocity(= joint_vel × GEAR_RATIO)를 사용해야 함.
+    # Core loss(히스테리시스+와전류)는 모터 측 각속도에서 발생하므로
+    # joint velocity가 아닌 motor velocity(= joint_vel x GEAR_RATIO)를 사용한다.
     omega_motor = vel_abs * ratio
     p_core = (K_HYST * omega_motor) + (K_EDDY * torch.square(omega_motor))
     

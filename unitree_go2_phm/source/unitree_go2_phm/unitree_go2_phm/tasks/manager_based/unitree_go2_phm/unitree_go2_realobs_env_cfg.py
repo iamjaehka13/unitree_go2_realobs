@@ -194,7 +194,14 @@ class RealObsRewardsCfg:
     thermal_safety = RewTerm(
         func=phm_mdp.thermal_margin_reward_realobs,
         weight=0.03,
-        params={"std": 3.0, "limit_temp": 70.0, "warn_temp": 65.0, "coil_to_case_delta_c": 5.0},
+        params={
+            "std": 1.25,
+            "limit_temp": 70.0,
+            "warn_temp": 65.0,
+            "coil_to_case_delta_c": 5.0,
+            "margin_clip": 1.0,
+            "alpha_mean": 0.5,
+        },
     )
     saturation_prevention = RewTerm(
         func=phm_mdp.actuator_saturation_reward,
@@ -238,8 +245,40 @@ class UnitreeGo2RealObsEnvCfg(ManagerBasedRLEnvCfg):
     temperature_metric_semantics: str = "case_proxy"
     phm_fault_injection_mode: str = "single_motor_random"
     phm_fault_fixed_motor_id: int = -1
+    # For single_motor_random: sample mirror pairs uniformly then side 50:50.
     phm_fault_pair_uniform_enable: bool = True
+    # Hold sampled fault id for a fixed env-step window to stabilize step exposure.
     phm_fault_hold_steps: int = 1000
+    # Optional hard-case focus controls.
+    # In plain focus mode, `phm_fault_focus_prob` is the probability of replacing
+    # a fresh draw with focus motors/pairs. In weighted-pair mode, the same value
+    # becomes the uniform-vs-target mixing alpha.
+    phm_fault_focus_prob: float = 0.0
+    phm_fault_focus_motor_ids: tuple[int, ...] = ()
+    phm_fault_focus_pairs: tuple[tuple[int, int], ...] = ()
+    # Optional weighted pair sampler:
+    # p_pair = normalize(clamp((1-alpha)*uniform + alpha*target, floor, cap)).
+    phm_fault_pair_weighted_enable: bool = False
+    phm_fault_pair_prob_floor: float = 0.0
+    phm_fault_pair_prob_cap: float = 1.0
+    # Target weights follow mirror-pair order:
+    # [(0,3), (1,4), (2,5), (6,9), (7,10), (8,11)].
+    phm_fault_pair_target_weights: tuple[float, ...] = ()
+    # Optional adaptive pair targeting from previous-episode difficulty signals.
+    phm_fault_pair_adaptive_enable: bool = False
+    phm_fault_pair_adaptive_mix: float = 1.0
+    phm_fault_pair_adaptive_beta: float = 4.0
+    phm_fault_pair_adaptive_ema: float = 0.9
+    phm_fault_pair_adaptive_min_episode_per_pair: float = 20.0
+    phm_fault_pair_adaptive_w_fail: float = 0.55
+    phm_fault_pair_adaptive_w_sat: float = 0.30
+    phm_fault_pair_adaptive_w_latch: float = 0.15
+    phm_fault_pair_adaptive_sat_scale: float = 1.0
+    # Optional recent worst-motor focus on top of the base sampler.
+    phm_fault_motor_adaptive_enable: bool = False
+    phm_fault_motor_adaptive_topk: int = 3
+    phm_fault_motor_adaptive_min_episode_per_motor: float = 20.0
+    # Critical command governor.
     phm_scenario_id_critical: int = 4
     critical_governor_enable: bool = True
     critical_governor_v_cap_norm: float = 0.15
@@ -259,6 +298,10 @@ class UnitreeGo2RealObsEnvCfg(ManagerBasedRLEnvCfg):
     critical_governor_sat_trigger: float = 0.95
     critical_governor_sat_trigger_hi: float = 0.95
     critical_governor_sat_trigger_lo: float = 0.95
+    # Smooth the first action steps after unlatch to reduce release spikes.
+    critical_governor_post_unlatch_action_ramp_s: float = 0.0
+    # Optional per-step action slew clamp during the post-unlatch ramp.
+    critical_governor_post_unlatch_action_delta_max: float = 0.0
     voltage_sensor_bias_range_v: tuple[float, float] = (-0.12, 0.12)
     encoder_pos_noise_std_rad: float = 0.005
     encoder_vel_noise_std_rads: float = 0.03

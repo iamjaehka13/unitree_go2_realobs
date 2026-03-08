@@ -126,9 +126,11 @@ def thermal_margin_reward_realobs(
     limit_temp: float = 70.0,
     warn_temp: float | None = 65.0,
     coil_to_case_delta_c: float = 5.0,
+    margin_clip: float = 1.0,
+    alpha_mean: float = 0.5,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """[RealObs Safety] Case/housing temperature margin reward (measurable-channel proxy)."""
+    """[RealObs Safety] Case/housing temperature reward aligned to warn-crit normalized stress."""
     if not hasattr(env, "phm_state"):
         return torch.zeros(env.num_envs, device=env.device)
 
@@ -157,16 +159,19 @@ def thermal_margin_reward_realobs(
         joint_ids = slice(None)
     temps = temps[:, joint_ids]
 
-    # RealObs에서는 관측 warn threshold와 reward 시작점을 일치시키는 것을 기본으로 한다.
-    # warn_temp=None이면 기존 동작(0.95 * limit_temp)을 사용해 하위호환을 유지한다.
+    # RealObs reward shares the same warn-crit coordinate system as thermal_stress_realobs.
+    crit_temp = float(limit_temp)
     if warn_temp is None:
-        threshold = float(limit_temp) * 0.95
+        warn_temp = crit_temp * 0.95
     else:
-        threshold = min(float(warn_temp), float(limit_temp))
-    violation = torch.clamp(temps - threshold, min=0.0)
-    max_viol, _ = torch.max(violation, dim=1)
-    mean_viol = torch.mean(violation, dim=1)
-    total_cost = max_viol + (0.5 * mean_viol)
+        warn_temp = float(warn_temp)
+    warn_temp = min(warn_temp, crit_temp - 1e-6)
+
+    denom = max(crit_temp - warn_temp, 1e-6)
+    margin = torch.clamp((temps - warn_temp) / denom, min=0.0, max=float(margin_clip))
+    max_margin = torch.max(margin, dim=1).values
+    mean_margin = torch.mean(margin, dim=1)
+    total_cost = max_margin + (float(alpha_mean) * mean_margin)
     return torch.exp(-total_cost / (std**2))
 
 # =============================================================================

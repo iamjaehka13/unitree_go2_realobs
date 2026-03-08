@@ -42,7 +42,7 @@ parser.add_argument("--real-time", action="store_true", default=False, help="Sle
 parser.add_argument("--governor", action="store_true", default=False, help="Enable thermal/voltage governor")
 parser.add_argument("--temp_warn_c", type=float, default=65.0)
 parser.add_argument("--temp_crit_c", type=float, default=70.0)
-parser.add_argument("--temp_stop_c", type=float, default=72.0)
+parser.add_argument("--temp_stop_c", type=float, default=75.0)
 parser.add_argument("--cell_warn_v", type=float, default=3.20)
 parser.add_argument("--cell_stop_v", type=float, default=3.05, help="Cell-voltage scale stop point (soft)")
 parser.add_argument("--cell_hard_stop_v", type=float, default=3.00, help="Cell-voltage hard stop threshold")

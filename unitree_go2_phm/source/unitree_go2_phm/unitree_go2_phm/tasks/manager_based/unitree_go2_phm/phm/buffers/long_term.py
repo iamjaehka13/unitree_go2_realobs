@@ -9,19 +9,17 @@ if TYPE_CHECKING:
 class LongTermHealthBuffer:
     """
     [PHM Core] 로봇의 장기적 건강 상태 변화와 열화 추이를 추적하는 통계 버퍼.
-    Refinements (v3.0 - Slope Accuracy Fix):
-    1. [Fix] Cold Start Bias: fill_count 기반 slope 분모 → 버퍼 미충전 시 왜곡 방지.
-    2. [Fix] Decoupling: 환경 내부 카운터(_sim_step_counter) 의존성 제거.
-    3. [Fix] Modularity: 관절 개수(num_joints)를 인자로 받아 범용성 확보.
-    4. [Fix] 'temperature' -> 'coil_temp' renaming.
-    5. [Fix] step_timer를 1부터 시작하여 리셋 직후 0%interval==0 스냅샷 방지.
-    6. [Fix] reset 시 초기값을 snapshot_index=0에 기록하고 fill_count=1로 설정.
+
+    Notes:
+    1. fill_count 기반 slope 분모로 cold-start 왜곡을 줄인다.
+    2. 환경 내부 스텝 카운터에 의존하지 않고 자체 타이머를 사용한다.
+    3. 관절 개수를 인자로 받아 태스크별로 재사용할 수 있다.
     """
     def __init__(self, num_envs: int, num_joints: int, device: str, history_length: int = 10, snapshot_interval: int = 100):
         """
         Args:
             num_envs: 환경 개수
-            num_joints: 관절 개수 (Audit Fix: 범용성 확보)
+            num_joints: 관절 개수
             device: 디바이스
             history_length: 윈도우 크기
             snapshot_interval: 스냅샷 주기
@@ -39,7 +37,7 @@ class LongTermHealthBuffer:
         self.fatigue_snapshots = torch.zeros((num_envs, history_length, num_joints), device=device)
         self.snapshot_index = torch.zeros(num_envs, dtype=torch.long, device=device)
 
-        # [Audit Fix 2] 환경 독립적인 자체 타이머 (Reset 시 1로 초기화)
+        # 환경 독립적인 자체 타이머 (Reset 시 1로 초기화)
         # [Fix] 1부터 시작: 0%interval==0 방지 (리셋 직후 불필요한 스냅샷 트리거 차단)
         self.step_timer = torch.ones(num_envs, dtype=torch.long, device=device)
         
@@ -47,7 +45,7 @@ class LongTermHealthBuffer:
         # slope 계산 시 history_length 대신 max(fill_count-1, 1)로 나누어 정확한 기울기 산출.
         self.fill_count = torch.zeros(num_envs, dtype=torch.long, device=device)
         
-        # [Audit Fix 1] 버퍼가 한 바퀴 돌았는지 확인하는 플래그 (Cold Start 방지)
+        # 버퍼가 한 바퀴 돌았는지 확인하는 플래그 (Cold Start 방지)
         self.is_buffer_filled = torch.zeros(num_envs, dtype=torch.bool, device=device)
 
     def update(self, env: ManagerBasedRLEnv, dt: float, env_ids=None):
@@ -103,7 +101,7 @@ class LongTermHealthBuffer:
             self.fill_count[env_ids] + 1, max=self.history_length
         )
 
-        # [Audit Fix 1] 인덱스가 0으로 돌아왔다면, 버퍼가 가득 찬 것임
+        # 인덱스가 0으로 돌아왔다면, 버퍼가 가득 찬 것임
         filled_mask = (new_indices == 0)
         if torch.any(filled_mask):
             self.is_buffer_filled[env_ids[filled_mask]] = True
@@ -156,7 +154,7 @@ class LongTermHealthBuffer:
         self.fatigue_snapshots[env_ids] = 0.0
         self.snapshot_index[env_ids] = 0
         
-        # [Audit Fix 2] 타이머 및 플래그 리셋
+        # 타이머 및 플래그 리셋
         # [Fix] step_timer를 1로 시작 (0%interval==0 방지)
         self.step_timer[env_ids] = 1
         self.fill_count[env_ids] = 0

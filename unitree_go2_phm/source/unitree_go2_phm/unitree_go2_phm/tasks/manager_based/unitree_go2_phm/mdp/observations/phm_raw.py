@@ -1,13 +1,13 @@
 # =============================================================================
 # unitree_go2_phm/mdp/observations/phm_raw.py
-# [Audit Status]: FINALIZED (Strategic Gambler - Voltage Budget Added)
+# Raw PHM observation helpers for power, thermal, and voltage-budget channels.
 # =============================================================================
 # Description:
 # PHM(Prognostics and Health Management) 관측 계층.
 #
 # [Key Features]
 # 1. SSOT Enforced: 전력 데이터를 Interface 적분값(avg_power_log)에서 직접 조회.
-# 2. Strategic Masking: Risk Factor에 따라 가용 전압을 마스킹하여 예산(Budget)으로 제공.
+# 2. Risk-conditioned masking: Risk Factor에 따라 가용 전압을 예산(Budget) 형태로 제공.
 # =============================================================================
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ def energy_consumption_raw(
 
 
 # =============================================================================
-# 2. Strategic Intelligence Metrics (New)
+# 2. Voltage Budget and Health Metrics
 # =============================================================================
 
 def available_voltage_budget(
@@ -72,7 +72,7 @@ def available_voltage_budget(
     cutoff_voltage: float = 24.5
 ) -> torch.Tensor:
     """
-    [Strategic Observation] 위험 감수 계수 기반 가용 에너지 예산.
+    [Risk-Conditioned Observation] 위험 감수 계수 기반 가용 에너지 예산.
     
     Formula:
         Budget = (Current_Voltage - Cutoff) * Risk_Factor
@@ -83,7 +83,7 @@ def available_voltage_budget(
         - 에이전트는 이 'Budget'이 0이 되면 전압 컷오프(사망)가 임박했다고 착각하게 됨.
     """
     # 1. 현재 배터리 전압 조회
-    # [Fix #8] Strategic setup 기본값은 BMS 전압 예측값(bms_voltage_pred) 사용.
+    # [Fix #8] Hidden-state budget 경로 기본값은 BMS 전압 예측값(bms_voltage_pred) 사용.
     # (brownout source는 env cfg에서 변경 가능)
     # 이전: battery_voltage(biased)를 사용하여 brownout/전략 관측 채널이 괴리됨.
     if not hasattr(env, "phm_state"):
@@ -110,7 +110,7 @@ def available_voltage_budget(
     # 실제 전압이 Cutoff보다 낮으면 0
     true_headroom = torch.clamp(current_v - cutoff_voltage, min=0.0)
     
-    # 4. 전략적 마스킹 (Strategic Masking)
+    # 4. Risk-conditioned masking
     # Risk가 낮을수록 Headroom이 적은 것처럼 속임
     perceived_budget = true_headroom * risk_factor
     
@@ -408,7 +408,7 @@ def debug_phm_energy_dashboard(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) 
 
     log_msg = (
         f"\n{'='*60}\n"
-        f"[PHM Audit Dashboard] Step: {step}\n"
+        f"[PHM Dashboard] Step: {step}\n"
         f"------------------------------------------------------------\n"
         f"Power (Integrator)    | Avg: {avg_power:8.2f} W\n"
         f"Voltage (Avg)         | Val: {avg_v:8.2f} V (Risk: {avg_risk:.2f})\n"

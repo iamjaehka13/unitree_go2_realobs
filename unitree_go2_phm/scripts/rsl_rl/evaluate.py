@@ -1,8 +1,8 @@
 # =============================================================================
-# evaluate.py — PHM Paper Evaluation Script
+# evaluate.py — PHM Evaluation / Reporting Script
 # =============================================================================
-# Runs a trained policy under controlled degradation scenarios and collects
-# quantitative metrics for paper tables and figures.
+# Runs a trained policy under controlled degradation scenarios and exports
+# locomotion, safety, and governor diagnostics for reports and paper tables.
 #
 # Usage:
 #   python evaluate.py --task Unitree-Go2-Phm-v1 \
@@ -12,7 +12,10 @@
 #       --headless
 # =============================================================================
 
-"""Launch Isaac Sim Simulator first."""
+"""Evaluation entrypoint.
+
+AppLauncher must be initialized before importing Isaac task modules.
+"""
 
 import argparse
 import sys
@@ -314,7 +317,7 @@ simulation_app = app_launcher.app
 import carb
 carb.settings.get_settings().set_int("/log/channels/omni.physx.tensors.plugin/level", 1)
 
-"""Rest everything follows."""
+"""The remaining imports depend on AppLauncher/Hydra argv being configured above."""
 
 import csv
 import gymnasium as gym
@@ -336,6 +339,10 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import unitree_go2_phm.tasks  # noqa: F401
+from unitree_go2_phm.tasks.manager_based.unitree_go2_phm.phm.interface import (
+    case_proxy_safe_coil_max_for_reset,
+    thermal_termination_params_from_cfg,
+)
 from unitree_go2_phm.tasks.manager_based.unitree_go2_phm.phm.utils import compute_battery_voltage
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -343,7 +350,7 @@ torch.backends.cudnn.allow_tf32 = True
 
 
 # =============================================================================
-# Degradation Scenarios (Paper Table Rows)
+# Evaluation Scenario Presets
 # =============================================================================
 SCENARIOS = {
     "fresh": {
@@ -506,17 +513,7 @@ class _RewardBreakdownCollector:
 
 def _thermal_failure_params(base_env) -> tuple[float | None, bool, float]:
     """Read thermal termination settings from env cfg (None when disabled)."""
-    threshold_temp: float | None = None
-    use_case_proxy = False
-    coil_to_case_delta_c = 5.0
-    term_cfg = getattr(getattr(base_env, "cfg", None), "terminations", None)
-    thermal_failure = getattr(term_cfg, "thermal_failure", None) if term_cfg is not None else None
-    params = getattr(thermal_failure, "params", None)
-    if isinstance(params, dict):
-        threshold_temp = float(params.get("threshold_temp", 90.0))
-        use_case_proxy = bool(params.get("use_case_proxy", use_case_proxy))
-        coil_to_case_delta_c = float(params.get("coil_to_case_delta_c", coil_to_case_delta_c))
-    return threshold_temp, use_case_proxy, coil_to_case_delta_c
+    return thermal_termination_params_from_cfg(getattr(base_env, "cfg", None))
 
 
 def _case_temperature_tensor(phm):
@@ -528,18 +525,32 @@ def _case_temperature_tensor(phm):
     return None
 
 
-def _temperature_metric_semantics(base_env) -> str:
-    """Resolve which temperature channel should be reported/evaluated."""
+def _temperature_metric_semantics_with_source(base_env) -> tuple[str, str]:
+    """Resolve temperature metric semantics and where that decision came from."""
     cfg = getattr(base_env, "cfg", None)
     explicit = str(getattr(cfg, "temperature_metric_semantics", "")).strip().lower()
     if explicit in {"case_proxy", "case", "case_like"}:
-        return "case_proxy"
+        return "case_proxy", "cfg.temperature_metric_semantics"
     if explicit in {"coil_hotspot", "coil"}:
-        return "coil_hotspot"
+        return "coil_hotspot", "cfg.temperature_metric_semantics"
 
     # Backward compatibility: infer from thermal termination params.
+    term_cfg = getattr(getattr(base_env, "cfg", None), "terminations", None)
+    thermal_failure = getattr(term_cfg, "thermal_failure", None) if term_cfg is not None else None
+    params = getattr(thermal_failure, "params", None)
     _, use_case_proxy, _ = _thermal_failure_params(base_env)
-    return "case_proxy" if use_case_proxy else "coil_hotspot"
+    if isinstance(params, dict):
+        source = "terminations.thermal_failure.params.use_case_proxy"
+    else:
+        source = "default_fallback(coil_hotspot)"
+    semantics = "case_proxy" if use_case_proxy else "coil_hotspot"
+    return semantics, source
+
+
+def _temperature_metric_semantics(base_env) -> str:
+    """Resolve which temperature channel should be reported/evaluated."""
+    semantics, _ = _temperature_metric_semantics_with_source(base_env)
+    return semantics
 
 
 def _fault_injection_params(base_env, num_motors: int, strict: bool = False) -> tuple[str, int]:
@@ -811,16 +822,24 @@ def apply_scenario(env, scenario_name: str, env_ids: torch.Tensor):
     # RealObs thermal termination may use case-proxy 72C; reduce injected critical/aged
     # case-equivalent temperature to avoid immediate-start failures in evaluation.
     if use_case_proxy and threshold_temp is not None:
+        safe_coil_tmax = case_proxy_safe_coil_max_for_reset(
+            threshold_temp=threshold_temp,
+            coil_to_case_delta_c=coil_to_case_delta_c,
+        )
         if scenario_name == "critical":
             case_tmax = max(30.0, threshold_temp - 2.0)
             case_tmin = max(25.0, case_tmax - 12.0)
             tmin = case_tmin + coil_to_case_delta_c
             tmax = case_tmax + coil_to_case_delta_c
+            tmax = max(30.0, min(tmax, safe_coil_tmax))
+            tmin = min(tmin, tmax)
         elif scenario_name == "aged":
             case_tmax = max(30.0, threshold_temp - 8.0)
             case_tmin = max(25.0, case_tmax - 14.0)
             tmin = case_tmin + coil_to_case_delta_c
             tmax = case_tmax + coil_to_case_delta_c
+            tmax = max(30.0, min(tmax, safe_coil_tmax))
+            tmin = min(tmin, tmax)
 
     fatigue = torch.zeros((n, num_motors), device=device, dtype=torch.float32)
     health = torch.ones((n, num_motors), device=device, dtype=torch.float32)
@@ -1216,8 +1235,11 @@ def run_evaluation(
     ep_crit_latched_steps = torch.zeros(num_envs, dtype=torch.float32)
     ep_crit_action_delta_latched_sum = torch.zeros(num_envs, dtype=torch.float32)
     ep_crit_action_delta_latched_max = torch.zeros(num_envs, dtype=torch.float32)
+    ep_crit_action_transition_delta_sum = torch.zeros(num_envs, dtype=torch.float32)
+    ep_crit_action_transition_delta_max = torch.zeros(num_envs, dtype=torch.float32)
     ep_crit_cmd_delta_latched_sum = torch.zeros(num_envs, dtype=torch.float32)
     ep_crit_cmd_delta_latched_max = torch.zeros(num_envs, dtype=torch.float32)
+    ep_crit_post_unlatch_ramp_active_steps = torch.zeros(num_envs, dtype=torch.float32)
     ep_crit_cmd_delta_active_steps = torch.zeros(num_envs, dtype=torch.float32)
     ep_crit_cmd_delta_active_latched_steps = torch.zeros(num_envs, dtype=torch.float32)
     ep_crit_sat_ratio_fallback_steps = torch.zeros(num_envs, dtype=torch.float32)
@@ -1591,7 +1613,9 @@ def run_evaluation(
         crit_sat_ratio_step = torch.zeros(num_envs, dtype=torch.float32)
         latched_step_mask = torch.zeros(num_envs, dtype=torch.float32)
         action_delta_step = torch.zeros(num_envs, dtype=torch.float32)
+        action_transition_delta_step = torch.zeros(num_envs, dtype=torch.float32)
         cmd_delta_step = torch.zeros(num_envs, dtype=torch.float32)
+        post_unlatch_ramp_active_step = torch.zeros(num_envs, dtype=torch.float32)
         governor_mode_step = torch.zeros(num_envs, dtype=torch.long)
         raw_crit_any = getattr(base_env, "_crit_sat_any", None)
         raw_crit_ratio = None
@@ -1621,8 +1645,12 @@ def run_evaluation(
             term_ratio_vec = terminal_metrics.get("crit/sat_any_over_thr_ratio", None)
             term_latched_vec = terminal_metrics.get("crit/is_latched", None)
             term_action_delta_vec = terminal_metrics.get("crit/action_delta_norm_step", None)
+            term_action_transition_delta_vec = terminal_metrics.get("crit/action_transition_delta_norm_step", None)
             term_cmd_delta_vec = terminal_metrics.get("crit/cmd_delta_norm_step", None)
             term_mode_vec = terminal_metrics.get("crit/governor_mode_step", None)
+            term_post_unlatch_ramp_active_vec = terminal_metrics.get(
+                "crit/post_unlatch_action_ramp_active_step", None
+            )
             for env_idx, pos in terminal_lookup.items():
                 if isinstance(term_any_vec, torch.Tensor):
                     crit_sat_any_step[env_idx] = float(term_any_vec[pos].detach().cpu().item())
@@ -1632,34 +1660,64 @@ def run_evaluation(
                     latched_step_mask[env_idx] = float(term_latched_vec[pos].detach().cpu().item())
                 if isinstance(term_action_delta_vec, torch.Tensor):
                     action_delta_step[env_idx] = float(term_action_delta_vec[pos].detach().cpu().item())
+                if isinstance(term_action_transition_delta_vec, torch.Tensor):
+                    action_transition_delta_step[env_idx] = float(
+                        term_action_transition_delta_vec[pos].detach().cpu().item()
+                    )
                 if isinstance(term_cmd_delta_vec, torch.Tensor):
                     cmd_delta_step[env_idx] = float(term_cmd_delta_vec[pos].detach().cpu().item())
                 if isinstance(term_mode_vec, torch.Tensor):
                     governor_mode_step[env_idx] = int(term_mode_vec[pos].detach().cpu().item())
+                if isinstance(term_post_unlatch_ramp_active_vec, torch.Tensor):
+                    post_unlatch_ramp_active_step[env_idx] = float(
+                        term_post_unlatch_ramp_active_vec[pos].detach().cpu().item()
+                    )
         # Per-step governor-action diagnostics (latched-step aggregation).
         raw_latched = (getattr(base_env, "_crit_latch_steps_remaining", None), getattr(base_env, "_crit_need_unlatch", None))
         raw_action_delta = getattr(base_env, "_crit_action_delta_norm_step", None)
+        raw_action_transition_delta = getattr(base_env, "_crit_action_transition_delta_norm_step", None)
         raw_cmd_delta = getattr(base_env, "_crit_cmd_delta_norm_step", None)
+        raw_post_unlatch_ramp_steps_remaining = getattr(
+            base_env, "_crit_post_unlatch_action_ramp_steps_remaining", None
+        )
         if (
             isinstance(raw_latched[0], torch.Tensor)
             and isinstance(raw_latched[1], torch.Tensor)
             and isinstance(raw_action_delta, torch.Tensor)
+            and isinstance(raw_action_transition_delta, torch.Tensor)
             and isinstance(raw_cmd_delta, torch.Tensor)
             and raw_action_delta.ndim == 1
+            and raw_action_transition_delta.ndim == 1
             and raw_cmd_delta.ndim == 1
             and raw_action_delta.shape[0] == num_envs
+            and raw_action_transition_delta.shape[0] == num_envs
             and raw_cmd_delta.shape[0] == num_envs
         ):
             live_latched = ((raw_latched[0] > 0) | raw_latched[1]).detach().cpu().to(torch.float32)
             live_action_delta = raw_action_delta.detach().cpu().to(torch.float32)
+            live_action_transition_delta = raw_action_transition_delta.detach().cpu().to(torch.float32)
             live_cmd_delta = raw_cmd_delta.detach().cpu().to(torch.float32)
+            if (
+                isinstance(raw_post_unlatch_ramp_steps_remaining, torch.Tensor)
+                and raw_post_unlatch_ramp_steps_remaining.ndim == 1
+                and raw_post_unlatch_ramp_steps_remaining.shape[0] == num_envs
+            ):
+                live_post_unlatch_ramp_active = (
+                    raw_post_unlatch_ramp_steps_remaining > 0
+                ).detach().cpu().to(torch.float32)
+            else:
+                live_post_unlatch_ramp_active = torch.zeros(num_envs, dtype=torch.float32)
             # Preserve terminal-step overrides for done envs (env.step reset contamination guard).
             live_latched[done_mask_cpu] = latched_step_mask[done_mask_cpu]
             live_action_delta[done_mask_cpu] = action_delta_step[done_mask_cpu]
+            live_action_transition_delta[done_mask_cpu] = action_transition_delta_step[done_mask_cpu]
             live_cmd_delta[done_mask_cpu] = cmd_delta_step[done_mask_cpu]
+            live_post_unlatch_ramp_active[done_mask_cpu] = post_unlatch_ramp_active_step[done_mask_cpu]
             latched_step_mask = live_latched
             action_delta_step = live_action_delta
+            action_transition_delta_step = live_action_transition_delta
             cmd_delta_step = live_cmd_delta
+            post_unlatch_ramp_active_step = live_post_unlatch_ramp_active
             if (
                 isinstance(raw_governor_mode, torch.Tensor)
                 and raw_governor_mode.ndim == 1
@@ -1692,8 +1750,13 @@ def run_evaluation(
         ep_crit_latched_steps += latched_step_mask
         ep_crit_action_delta_latched_sum += action_delta_step * latched_step_mask
         ep_crit_cmd_delta_latched_sum += cmd_delta_step * latched_step_mask
+        ep_crit_action_transition_delta_sum += action_transition_delta_step
+        ep_crit_post_unlatch_ramp_active_steps += post_unlatch_ramp_active_step
         ep_crit_action_delta_latched_max = torch.maximum(
             ep_crit_action_delta_latched_max, action_delta_step * latched_step_mask
+        )
+        ep_crit_action_transition_delta_max = torch.maximum(
+            ep_crit_action_transition_delta_max, action_transition_delta_step
         )
         ep_crit_cmd_delta_latched_max = torch.maximum(
             ep_crit_cmd_delta_latched_max, cmd_delta_step * latched_step_mask
@@ -1820,8 +1883,11 @@ def run_evaluation(
                     ep_crit_latched_steps[idx] = 0.0
                     ep_crit_action_delta_latched_sum[idx] = 0.0
                     ep_crit_action_delta_latched_max[idx] = 0.0
+                    ep_crit_action_transition_delta_sum[idx] = 0.0
+                    ep_crit_action_transition_delta_max[idx] = 0.0
                     ep_crit_cmd_delta_latched_sum[idx] = 0.0
                     ep_crit_cmd_delta_latched_max[idx] = 0.0
+                    ep_crit_post_unlatch_ramp_active_steps[idx] = 0.0
                     ep_crit_cmd_delta_active_steps[idx] = 0.0
                     ep_crit_cmd_delta_active_latched_steps[idx] = 0.0
                     ep_crit_sat_ratio_fallback_steps[idx] = 0.0
@@ -1991,8 +2057,14 @@ def run_evaluation(
                     unlatch_after_zero_success_ep = float("nan")
                     time_to_unlatch_after_zero_s = float("nan")
                 crit_action_delta_latched_mean_ep = float(ep_crit_action_delta_latched_sum[idx].item() / latched_steps)
+                crit_action_transition_delta_mean_ep = float(
+                    ep_crit_action_transition_delta_sum[idx].item() / ep_len_safe
+                )
                 crit_cmd_delta_latched_mean_ep = float(ep_crit_cmd_delta_latched_sum[idx].item() / latched_steps)
                 crit_cmd_delta_active_ratio_ep = float(ep_crit_cmd_delta_active_steps[idx].item() / ep_len_safe)
+                crit_post_unlatch_ramp_active_ratio_ep = float(
+                    ep_crit_post_unlatch_ramp_active_steps[idx].item() / ep_len_safe
+                )
                 if latched_steps_raw > 0.0:
                     crit_cmd_delta_active_latched_ratio_ep = float(
                         ep_crit_cmd_delta_active_latched_steps[idx].item() / latched_steps_raw
@@ -2104,6 +2176,15 @@ def run_evaluation(
                 episode_metrics["crit_action_delta_latched_norm_mean_ep"].append(crit_action_delta_latched_mean_ep)
                 episode_metrics["crit_action_delta_latched_norm_max_ep"].append(
                     float(ep_crit_action_delta_latched_max[idx].item())
+                )
+                episode_metrics["crit_action_transition_delta_norm_mean_ep"].append(
+                    crit_action_transition_delta_mean_ep
+                )
+                episode_metrics["crit_action_transition_delta_norm_max_ep"].append(
+                    float(ep_crit_action_transition_delta_max[idx].item())
+                )
+                episode_metrics["crit_post_unlatch_action_ramp_active_ratio_ep"].append(
+                    crit_post_unlatch_ramp_active_ratio_ep
                 )
                 episode_metrics["crit_cmd_delta_latched_norm_mean_ep"].append(crit_cmd_delta_latched_mean_ep)
                 episode_metrics["crit_cmd_delta_latched_norm_max_ep"].append(
@@ -2295,8 +2376,11 @@ def run_evaluation(
                 ep_crit_latched_steps[idx] = 0.0
                 ep_crit_action_delta_latched_sum[idx] = 0.0
                 ep_crit_action_delta_latched_max[idx] = 0.0
+                ep_crit_action_transition_delta_sum[idx] = 0.0
+                ep_crit_action_transition_delta_max[idx] = 0.0
                 ep_crit_cmd_delta_latched_sum[idx] = 0.0
                 ep_crit_cmd_delta_latched_max[idx] = 0.0
+                ep_crit_post_unlatch_ramp_active_steps[idx] = 0.0
                 ep_crit_cmd_delta_active_steps[idx] = 0.0
                 ep_crit_cmd_delta_active_latched_steps[idx] = 0.0
                 ep_crit_sat_ratio_fallback_steps[idx] = 0.0
@@ -2492,7 +2576,16 @@ def run_evaluation(
         "crit_post_unlatch_fixedwin_peak_sat_p95_ep": (
             "episode_p95(max_saturation) over fixed window after unlatch (0.5s ignore + 2.0s window)"
         ),
-        "crit_governor_mode_step": "terminal enum {0:none,1:v_cap,2:stand,3:stop_latch,4:other}",
+        "crit_post_unlatch_action_ramp_active_ratio_ep": (
+            "episode_step_ratio[post-unlatch action-ramp transition active]"
+        ),
+        "crit_action_transition_delta_norm_mean_ep": (
+            "episode_mean(||action_after_transition - action_before_transition||)"
+        ),
+        "crit_action_transition_delta_norm_max_ep": (
+            "episode_max(||action_after_transition - action_before_transition||)"
+        ),
+        "crit_governor_mode_step": "terminal enum {0:none,1:v_cap,2:stand,3:stop_latch,4:reserved_other}",
     }
     summary["_debug_forced_walk_ramp"] = {
         "enabled": bool(forced_walk_ramp_enabled),
@@ -2646,6 +2739,9 @@ def run_evaluation(
         "crit_post_unlatch_fixedwin_valid_ep",
         "crit_post_unlatch_fixedwin_peak_sat_ep",
         "crit_post_unlatch_fixedwin_peak_sat_p95_ep",
+        "crit_post_unlatch_action_ramp_active_ratio_ep",
+        "crit_action_transition_delta_norm_mean_ep",
+        "crit_action_transition_delta_norm_max_ep",
         "crit_sat_any_over_thr_ratio_terminal",
     )
     for key in required_keys:
@@ -2836,7 +2932,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env.unwrapped._enable_terminal_snapshot = True
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     threshold_temp, use_case_proxy, coil_to_case_delta_c = _thermal_failure_params(env.unwrapped)
-    temp_metric_semantics = _temperature_metric_semantics(env.unwrapped)
+    temp_metric_semantics, temp_metric_semantics_source = _temperature_metric_semantics_with_source(env.unwrapped)
     num_motors = int(env.unwrapped.phm_state.fatigue_index.shape[1])
     fault_mode_eval, fault_fixed_eval = _fault_injection_params(env.unwrapped, num_motors=num_motors, strict=True)
     is_fixed_fault_eval = bool(fault_mode_eval == "single_motor_fixed" and fault_fixed_eval >= 0)
@@ -2968,6 +3064,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if hasattr(env.unwrapped, "_crit_unlatch_require_sat_recovery")
         else None
     )
+    critical_governor_latch_hold_steps_effective = (
+        int(getattr(env.unwrapped, "_crit_latch_hold_steps"))
+        if hasattr(env.unwrapped, "_crit_latch_hold_steps")
+        else None
+    )
+    critical_governor_unlatch_stable_steps_effective = (
+        int(getattr(env.unwrapped, "_crit_unlatch_stable_steps_req"))
+        if hasattr(env.unwrapped, "_crit_unlatch_stable_steps_req")
+        else None
+    )
+    critical_governor_unlatch_cmd_norm_effective = (
+        float(getattr(env.unwrapped, "_crit_unlatch_cmd_norm"))
+        if hasattr(env.unwrapped, "_crit_unlatch_cmd_norm")
+        else None
+    )
+    critical_governor_post_unlatch_action_ramp_s_effective = (
+        float(getattr(env.unwrapped, "_crit_post_unlatch_action_ramp_s"))
+        if hasattr(env.unwrapped, "_crit_post_unlatch_action_ramp_s")
+        else None
+    )
+    critical_governor_post_unlatch_action_delta_max_effective = (
+        float(getattr(env.unwrapped, "_crit_post_unlatch_action_delta_max"))
+        if hasattr(env.unwrapped, "_crit_post_unlatch_action_delta_max")
+        else None
+    )
 
     eval_meta = {
         "task": args_cli.task,
@@ -2977,10 +3098,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "thermal_termination_enabled": bool(threshold_temp is not None),
         "thermal_use_case_proxy": bool(use_case_proxy),
         "coil_to_case_delta_c": float(coil_to_case_delta_c),
-        "temperature_metric_semantics_source": "cfg.temperature_metric_semantics",
+        "temperature_metric_semantics_source": str(temp_metric_semantics_source),
         "scenario_injection_note": (
-            "critical/aged injection ranges are adapted when case-proxy thermal termination is enabled "
-            "to avoid immediate-start truncation."
+            "critical/aged injection ranges are adapted and capped with the shared case-proxy safe reset bound "
+            "when case-proxy thermal termination is enabled."
         ),
         "fault_injection_mode_eval": str(fault_mode_eval),
         "fault_fixed_motor_id_eval": int(fault_fixed_eval),
@@ -3038,6 +3159,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "critical_governor_sat_trigger_lo_effective": critical_governor_sat_trigger_lo_effective,
         "critical_governor_unlatch_require_low_cmd_effective": critical_governor_unlatch_require_low_cmd_effective,
         "critical_governor_unlatch_require_sat_recovery_effective": critical_governor_unlatch_require_sat_recovery_effective,
+        "critical_governor_latch_hold_steps_effective": critical_governor_latch_hold_steps_effective,
+        "critical_governor_unlatch_stable_steps_effective": critical_governor_unlatch_stable_steps_effective,
+        "critical_governor_unlatch_cmd_norm_effective": critical_governor_unlatch_cmd_norm_effective,
+        "critical_governor_post_unlatch_action_ramp_s_effective": (
+            critical_governor_post_unlatch_action_ramp_s_effective
+        ),
+        "critical_governor_post_unlatch_action_delta_max_effective": (
+            critical_governor_post_unlatch_action_delta_max_effective
+        ),
         "critical_governor_sat_metric_default": "crit_sat_any_over_thr_ratio_ep",
         "critical_governor_sat_metric_legacy_terminal": "crit_sat_any_over_thr_ratio",
     }

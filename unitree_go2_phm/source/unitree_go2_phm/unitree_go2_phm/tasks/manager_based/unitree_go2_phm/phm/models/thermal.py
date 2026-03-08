@@ -1,6 +1,6 @@
 # =============================================================================
 # unitree_go2_phm/phm/models/thermal.py
-# [Audit Status]: FINALIZED (Simplified Integrator - No Double Counting)
+# Thermal state update helpers for the Go2 PHM model.
 # =============================================================================
 
 from __future__ import annotations

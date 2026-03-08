@@ -148,6 +148,8 @@ EVAL_CMD=(
   --num_episodes "$NUM_EPISODES"
   --seed "$SEED"
   --output_dir "$ROUND_DIR"
+  # Reward tuning is exploratory; don't enforce paper fixed-fault protocol.
+  --no-paper-protocol-strict
 )
 if [[ -n "$DEVICE" ]]; then
   EVAL_CMD+=(--device "$DEVICE")
@@ -217,4 +219,3 @@ echo "Next:"
 echo "  1) Apply only top 1-2 recommendation edits manually (<=10~15%)."
 echo "  2) Retrain and rerun this script."
 echo "  3) If gate fails, rollback previous reward set."
-

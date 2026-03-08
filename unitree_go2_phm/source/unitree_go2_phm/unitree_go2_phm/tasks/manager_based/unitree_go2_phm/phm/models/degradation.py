@@ -1,4 +1,7 @@
+# =============================================================================
 # unitree_go2_phm/phm/models/degradation.py
+# Fatigue accumulation helpers for PHM motor health tracking.
+# =============================================================================
 
 from __future__ import annotations
 import torch
@@ -21,12 +24,6 @@ if TYPE_CHECKING:
 def update_fatigue_index(env: ManagerBasedRLEnv, dt: float, env_ids: Optional[torch.Tensor] = None):
     """
     [PHM Core] 기계적 피로 누적도 계산 (Torque + Vibration + Thermal Stress).
-    
-    Refinements (v3.3 Final):
-    1. [Naming] state.py와 변수명 통일 (fatigue_index, coil_temp).
-    2. [Config] 하드코딩된 숫자들을 constants.py의 상수로 대체.
-    3. [Physics] 정지 상태(Stall)에서도 고부하시 미세 마모(Fretting) 반영.
-    4. [Parallel] env_ids 슬라이싱 완벽 지원.
     """
     if env_ids is None:
         env_ids = slice(None)
@@ -48,8 +45,7 @@ def update_fatigue_index(env: ManagerBasedRLEnv, dt: float, env_ids: Optional[to
     # vibration_g: (N,) -> (N, 1) - 로봇 바디 전체 진동 (IMU 기반)
     # jitter_intensity: (N, J) - 관절별 가속도 jitter (ShortTermBuffer 기반)
     # coil_temp: (N, J) - 각 관절별 코일 온도
-    # [Fix #2] 바디 진동(vibration_g)과 관절별 jitter를 결합하여
-    # 각 모터가 서로 다른 진동 스트레스를 받도록 수정.
+    # 바디 진동과 관절별 jitter를 결합해 모터별 진동 스트레스를 분리한다.
     body_vibration = env.phm_state.vibration_g[env_ids].unsqueeze(-1)  # (N, 1)
     joint_jitter = env.phm_state.jitter_intensity[env_ids]             # (N, J)
     vibration_combined = body_vibration + joint_jitter                  # (N, J)
@@ -58,9 +54,8 @@ def update_fatigue_index(env: ManagerBasedRLEnv, dt: float, env_ids: Optional[to
     # -------------------------------------------------------------------------
     # 2. 정규화된 부하 (Normalized Load with Nominal Limits)
     # -------------------------------------------------------------------------
-    # [Fix] 공칭(Nominal) 토크 한계 사용 — runtime-degraded 값을 쓰면
-    # 열화 → 한계↓ → 부하율↑ → 피로↑ → 열화↑ 양의 피드백 루프 발생.
-    # L10 베어링 수명 모델의 정격 부하는 원래 스펙 기준이어야 함.
+    # 정격 부하는 스펙 기준 한계를 사용한다.
+    # runtime-degraded 값을 사용하면 열화와 부하율 사이에 과한 양의 피드백이 생긴다.
     if hasattr(env, "_nominal_effort_limits") and env._nominal_effort_limits is not None:
         effort_limits = env._nominal_effort_limits[env_ids][:, joint_indices]
     else:

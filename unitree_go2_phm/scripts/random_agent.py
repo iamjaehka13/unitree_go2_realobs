@@ -3,9 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Script to an environment with random action agent."""
+"""Run a random-action agent in an Isaac Lab environment."""
 
-"""Launch Isaac Sim Simulator first."""
+"""Agent entrypoint.
+
+AppLauncher must be initialized before importing Isaac task modules.
+"""
 
 import argparse
 
@@ -27,7 +30,7 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-"""Rest everything follows."""
+"""Isaac task imports follow AppLauncher initialization."""
 
 import gymnasium as gym
 import torch

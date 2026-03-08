@@ -3,9 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Script to play a checkpoint with an RL agent from RSL-RL."""
+"""Play a trained RSL-RL checkpoint for visualization, video capture, or debug."""
 
-"""Launch Isaac Sim Simulator first."""
+"""Playback entrypoint.
+
+AppLauncher must be initialized before importing Isaac task modules.
+"""
 
 import argparse
 import sys
@@ -169,7 +172,7 @@ simulation_app = app_launcher.app
 import carb
 carb.settings.get_settings().set_int("/log/channels/omni.physx.tensors.plugin/level", 1)
 
-"""Rest everything follows."""
+"""Isaac task imports follow AppLauncher initialization."""
 
 import gymnasium as gym
 import os

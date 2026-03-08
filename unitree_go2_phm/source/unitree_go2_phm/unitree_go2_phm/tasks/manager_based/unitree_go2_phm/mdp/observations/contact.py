@@ -1,11 +1,12 @@
 # =============================================================================
 # unitree_go2_phm/mdp/observations/contact.py
+# Contact-derived PHM observation helpers for CoP, impact, and vibration metrics.
 # =============================================================================
 # Purpose:
 #   Compute PHM (Physical Health Monitoring) metrics using foot contact data.
-#   Strictly separates data sources:
-#     1. CoP/Locomotion -> force_matrix_w (Filtered Ground Contact Only)
-#     2. Impact/Damage  -> net_forces_w (Total Mechanical Load)
+#   Data sources are intentionally separated:
+#     1. CoP/locomotion -> force_matrix_w (filtered ground contacts only)
+#     2. Impact/damage  -> net_forces_w (total mechanical load)
 # =============================================================================
 
 from __future__ import annotations
@@ -112,7 +113,8 @@ def _calculate_cop_body_frame_vectorized(
         return torch.zeros((env.num_envs, idx_len, 3), device=env.device)
 
     # 2. Strict Data Source Enforcement
-    # [Fix] Fallback 로직 삭제. force_matrix_w가 없으면 CoP는 정의되지 않음(0).
+    # CoP is undefined without filtered ground-contact forces.
+    # Return zeros instead of falling back to net_forces_w.
     if not hasattr(data, "force_matrix_w") or data.force_matrix_w is None:
         if not _LOG_FLAGS["force_matrix"]:
             logging.error(
@@ -249,7 +251,7 @@ def weighted_contact_acceleration(
 
         return torch.zeros((env.num_envs, len(sensor_cfg.body_ids)), device=env.device)
 
-    # [Fix] 벡터 기반 중력 제거: 로봇이 기울어진 상태에서도 정확한 진동 추출
+    # projected_gravity_b 기반 중력 제거로 기울어진 자세에서도 동적 진동만 남긴다.
     # projected_gravity_b ≈ [0,0,-1] (단위 벡터), lin_acc_b ≈ [0,0,+9.81] (정지 시)
     # 정지 시 결과가 0이 되려면: imu + (pg * g) = [0,0,+9.81] + [0,0,-9.81] = 0 ✓
     # (utils.py의 compute_kinematic_accel과 동일한 수식)

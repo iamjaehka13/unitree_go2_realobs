@@ -13,15 +13,7 @@ from isaaclab.sensors import ContactSensor
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
-"""
-[PHM Termination Module]
-이 모듈은 물리 시뮬레이션이나 상태 업데이트를 수행하지 않습니다.
-오직 interface.py에서 계산된 PHMState 값을 읽어 종료 조건(Termination)을 판정합니다.
-
-Core Principle:
-- Single Source of Truth (SSOT): 물리적 기준(속도, 토크 한계 등)은 constants.py에 정의됨.
-- Judge-Only: 이곳은 계산된 State(타이머, 온도 등)가 임계치를 넘었는지만 판단함.
-"""
+"""Termination checks that read PHM state without mutating simulation state."""
 
 # =============================================================================
 # 1. Electrical Safety (전기적 보호)
@@ -74,8 +66,7 @@ def motor_stall(
     if not hasattr(env, "phm_state") or not hasattr(env.phm_state, "stall_timer"):
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
-    # 2. 판정 (Pure Judge): 타이머가 임계치를 넘었는가?
-    # [Fix #7] stall_timer가 (N, J) per-motor이므로, 어떤 모터라도 초과 시 종료.
+    # 2. 판정: stall_timer가 (N, J) per-motor이면 어떤 모터라도 초과 시 종료.
     stall_exceeded = env.phm_state.stall_timer > stall_time_threshold_s
     if stall_exceeded.dim() > 1:
         return torch.any(stall_exceeded, dim=1)

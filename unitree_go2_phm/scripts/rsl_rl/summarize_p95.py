@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+"""Aggregate safety-tail and post-unlatch transition metrics from eval JSON files."""
+
 import argparse
 import csv
 import json
@@ -15,7 +17,7 @@ METRIC_SPECS: dict[str, dict[str, str]] = {
     "peak_saturation_episode": {"PeakSat_max": "max", "PeakSat_p95": "p95"},
     "crit_latch_mean_dur_s_ep": {"LatchDur_s_max": "max", "LatchDur_s_p95": "p95"},
     "crit_latch_mean_dur_steps_ep": {"LatchDur_steps_max": "max", "LatchDur_steps_p95": "p95"},
-    # Recovery metrics (new default columns)
+    # Recovery and post-unlatch transition metrics
     "crit_time_to_first_latch_s": {"T1Latch_s_mean": "mean", "T1Latch_s_p95": "p95"},
     "crit_time_to_unlatch_s": {"TUnlatch_s_mean": "mean", "TUnlatch_s_p95": "p95"},
     "crit_time_to_unlatch_after_zero_s": {
@@ -38,6 +40,18 @@ METRIC_SPECS: dict[str, dict[str, str]] = {
         "UnlatchAfterZeroSucc_mean": "mean",
         "UnlatchAfterZeroSucc_p95": "p95",
     },
+    "crit_post_unlatch_action_ramp_active_ratio_ep": {
+        "PostUnlatchRampActiveRatio_mean": "mean",
+        "PostUnlatchRampActiveRatio_p95": "p95",
+    },
+    "crit_action_transition_delta_norm_mean_ep": {
+        "ActionTransitionDeltaNorm_mean": "mean",
+        "ActionTransitionDeltaNorm_p95": "p95",
+    },
+    "crit_action_transition_delta_norm_max_ep": {
+        "ActionTransitionDeltaNormMax_mean": "mean",
+        "ActionTransitionDeltaNormMax_p95": "p95",
+    },
 }
 
 META_KEYS = {
@@ -48,6 +62,9 @@ META_KEYS = {
     "critical_governor_sat_trigger_lo_effective": "sat_lo",
     "critical_governor_unlatch_require_low_cmd_effective": "unlatch_low_cmd",
     "critical_governor_unlatch_require_sat_recovery_effective": "unlatch_sat_recovery",
+    "critical_governor_unlatch_stable_steps_effective": "stable_steps",
+    "critical_governor_post_unlatch_action_ramp_s_effective": "post_ramp_s",
+    "critical_governor_post_unlatch_action_delta_max_effective": "post_delta_max",
 }
 
 
@@ -111,7 +128,9 @@ def _run_label(run_dir: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Summarize eval JSON with max/p95 safety-tail metrics.")
+    parser = argparse.ArgumentParser(
+        description="Summarize eval JSON with safety-tail, recovery, and post-unlatch transition metrics."
+    )
     parser.add_argument("--root", type=Path, required=True, help="Root directory that contains eval run dirs.")
     parser.add_argument("--glob", type=str, default="*/eval_*.json", help="Glob under root.")
     parser.add_argument("--all", action="store_true", help="Use all eval files (default: latest per run dir only).")
@@ -253,6 +272,9 @@ def main() -> None:
         "sat_lo",
         "unlatch_low_cmd",
         "unlatch_sat_recovery",
+        "stable_steps",
+        "post_ramp_s",
+        "post_delta_max",
         "has_p95",
         "Survival%",
         "TrackErr",
@@ -276,6 +298,12 @@ def main() -> None:
         "UnlatchAfterZeroSucc_p95",
         "PostUnlatchFixWinPeakSat95_mean",
         "PostUnlatchFixWinPeakSat95_p95",
+        "PostUnlatchRampActiveRatio_mean",
+        "PostUnlatchRampActiveRatio_p95",
+        "ActionTransitionDeltaNorm_mean",
+        "ActionTransitionDeltaNorm_p95",
+        "ActionTransitionDeltaNormMax_mean",
+        "ActionTransitionDeltaNormMax_p95",
     ]
     for k in list(rows[0].keys()):
         if k.endswith("_count"):

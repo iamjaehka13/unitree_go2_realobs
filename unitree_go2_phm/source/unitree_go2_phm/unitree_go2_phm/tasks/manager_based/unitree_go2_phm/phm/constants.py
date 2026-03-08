@@ -1,15 +1,8 @@
 # =============================================================================
 # unitree_go2_phm/phm/constants.py
-# [Audit Status]: FINALIZED (No Duplicate Definitions)
+# Shared physical, thermal, and safety constants for the Go2 PHM tasks.
 # =============================================================================
-"""
-Unitree Go2 – PHM & RL 통합 상수 정의 파일 (Audit Final Version 2.0)
-
-[Technical Audit Log]
-1. [Consistency] contact.py, proprioception.py와의 정합성 확보.
-2. [Safety] 중복 정의 제거 (Silent Overwrite 해결).
-3. [Physics] PHM 모델(L10 Life Theory) 및 열역학 상수 통합.
-"""
+"""Shared physical, thermal, and safety constants for the Go2 PHM stack."""
 
 # =============================================================================
 # 1. Global Simulation Constants

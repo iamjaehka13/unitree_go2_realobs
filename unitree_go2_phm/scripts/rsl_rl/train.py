@@ -3,9 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Script to train RL agent with RSL-RL."""
+"""Train an RSL-RL policy with optional PHM fault-sampling overrides/schedules."""
 
-"""Launch Isaac Sim Simulator first."""
+"""Training entrypoint.
+
+AppLauncher must be initialized before importing Isaac task modules.
+"""
 
 import argparse
 import math
@@ -63,6 +66,177 @@ parser.add_argument(
     type=int,
     default=None,
     help="Override fault motor hold window (env steps) for single_motor_random mode.",
+)
+parser.add_argument(
+    "--train_fault_focus_prob",
+    type=float,
+    default=None,
+    help=(
+        "Override focus control for single_motor_random mode. "
+        "In plain focus sampling this is the replacement probability; "
+        "in weighted pair sampling it becomes the uniform-vs-target mixing alpha "
+        "(0.0~1.0, 0 disables focus bias)."
+    ),
+)
+parser.add_argument(
+    "--train_fault_focus_motor_ids",
+    type=str,
+    default=None,
+    help=(
+        "Comma-separated motor IDs for hard-case focus sampling in single_motor_random mode "
+        "(e.g., '0,3,7,10')."
+    ),
+)
+parser.add_argument(
+    "--train_fault_focus_pairs",
+    type=str,
+    default=None,
+    help=(
+        "Semicolon-separated focus motor pairs for hard-case sampling "
+        "(e.g., '7-10;2-8' or '7,10;2,8'). "
+        "If omitted, all mirror pairs are auto-selected when no explicit focus selector "
+        "and no motor-adaptive focus are requested."
+    ),
+)
+parser.add_argument(
+    "--train_fault_pair_weighted_enable",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help=(
+        "Enable weighted mirror-pair sampling for single_motor_random mode. "
+        "When enabled, pair probability uses a floor/cap-clamped mixture and "
+        "--train_fault_focus_prob becomes the uniform-vs-target mixing alpha."
+    ),
+)
+parser.add_argument(
+    "--train_fault_pair_prob_floor",
+    type=float,
+    default=None,
+    help="Lower clamp bound for per-pair sampling probability (0~1).",
+)
+parser.add_argument(
+    "--train_fault_pair_prob_cap",
+    type=float,
+    default=None,
+    help="Upper clamp bound for per-pair sampling probability (0~1).",
+)
+parser.add_argument(
+    "--train_fault_pair_target_weights",
+    type=str,
+    default=None,
+    help=(
+        "Comma-separated target pair weights in mirror-pair order "
+        "[(0,3),(1,4),(2,5),(6,9),(7,10),(8,11)] "
+        "(e.g., '0.10,0.10,0.30,0.10,0.25,0.15')."
+    ),
+)
+parser.add_argument(
+    "--train_fault_pair_adaptive_enable",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help=(
+        "Enable adaptive difficulty-driven pair target distribution. "
+        "Requires weighted pair sampling."
+    ),
+)
+parser.add_argument(
+    "--train_fault_pair_adaptive_mix",
+    type=float,
+    default=None,
+    help="Blend ratio between manual target and adaptive target (0~1).",
+)
+parser.add_argument(
+    "--train_fault_pair_adaptive_beta",
+    type=float,
+    default=None,
+    help="Softmax sharpness for adaptive pair difficulty -> probability mapping (>=0).",
+)
+parser.add_argument(
+    "--train_fault_pair_adaptive_ema",
+    type=float,
+    default=None,
+    help="EMA decay for adaptive target probabilities (0~1, higher=slower update).",
+)
+parser.add_argument(
+    "--train_fault_pair_adaptive_min_episode_per_pair",
+    type=float,
+    default=None,
+    help="Episode-count confidence scale for adaptive pair difficulty (>=1).",
+)
+parser.add_argument(
+    "--train_fault_pair_adaptive_w_fail",
+    type=float,
+    default=None,
+    help="Adaptive difficulty weight for non-timeout termination ratio (>=0).",
+)
+parser.add_argument(
+    "--train_fault_pair_adaptive_w_sat",
+    type=float,
+    default=None,
+    help="Adaptive difficulty weight for saturation ratio proxy (>=0).",
+)
+parser.add_argument(
+    "--train_fault_pair_adaptive_w_latch",
+    type=float,
+    default=None,
+    help="Adaptive difficulty weight for latch ratio proxy (>=0).",
+)
+parser.add_argument(
+    "--train_fault_pair_adaptive_sat_scale",
+    type=float,
+    default=None,
+    help="Normalization scale for adaptive saturation mean term (>0).",
+)
+parser.add_argument(
+    "--train_fault_motor_adaptive_enable",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help=(
+        "Enable recent worst-motor focus sampling for single_motor_random mode. "
+        "This keeps the base sampler and replaces a focus-prob fraction with recent worst top-k motors."
+    ),
+)
+parser.add_argument(
+    "--train_fault_motor_adaptive_topk",
+    type=int,
+    default=None,
+    help="Number of recent worst motors to include in adaptive focus set (>=1).",
+)
+parser.add_argument(
+    "--train_fault_motor_adaptive_min_episode_per_motor",
+    type=float,
+    default=None,
+    help="Episode-count confidence scale for adaptive worst-motor ranking (>=1).",
+)
+parser.add_argument(
+    "--train_fault_focus_ramp_start_iter",
+    type=int,
+    default=None,
+    help="Absolute learning iteration where focus-prob ramp starts (inclusive).",
+)
+parser.add_argument(
+    "--train_fault_focus_ramp_end_iter",
+    type=int,
+    default=None,
+    help="Absolute learning iteration where focus-prob ramp ends (inclusive).",
+)
+parser.add_argument(
+    "--train_fault_focus_ramp_start_prob",
+    type=float,
+    default=None,
+    help="Focus probability at ramp start iteration.",
+)
+parser.add_argument(
+    "--train_fault_focus_ramp_end_prob",
+    type=float,
+    default=None,
+    help="Focus probability at ramp end iteration.",
+)
+parser.add_argument(
+    "--train_fault_focus_ramp_segment_iters",
+    type=int,
+    default=50,
+    help="Iteration granularity for focus-prob updates while ramp is active.",
 )
 parser.add_argument(
     "--num_steps_per_env",
@@ -142,7 +316,7 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
     )
     exit(1)
 
-"""Rest everything follows."""
+"""Isaac task imports follow AppLauncher initialization."""
 
 import gymnasium as gym
 import logging
@@ -174,6 +348,213 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 logger = logging.getLogger(__name__)
 
 import unitree_go2_phm.tasks  # noqa: F401
+
+_FOCUS_ALL_MIRROR_PAIRS_12: tuple[tuple[int, int], ...] = (
+    (0, 3),
+    (1, 4),
+    (2, 5),
+    (6, 9),
+    (7, 10),
+    (8, 11),
+)
+
+
+def _parse_focus_motor_ids(raw_focus: str) -> tuple[int, ...]:
+    """Parse CSV-style motor id list into a unique ordered tuple."""
+    raw_focus = str(raw_focus).strip()
+    if raw_focus == "":
+        return ()
+
+    parts = [p.strip() for p in raw_focus.replace(";", ",").split(",") if p.strip() != ""]
+    if len(parts) == 0:
+        return ()
+
+    parsed_ids: list[int] = []
+    for part in parts:
+        try:
+            motor_id = int(part)
+        except Exception as e:
+            raise ValueError(
+                f"Invalid --train_fault_focus_motor_ids entry '{part}' (expected integer)."
+            ) from e
+        if not (0 <= motor_id < 12):
+            raise ValueError(
+                f"Invalid --train_fault_focus_motor_ids entry '{motor_id}' (expected 0..11)."
+            )
+        parsed_ids.append(motor_id)
+
+    # Keep order but remove duplicates.
+    return tuple(dict.fromkeys(parsed_ids))
+
+
+def _parse_focus_pairs(raw_pairs: str) -> tuple[tuple[int, int], ...]:
+    """Parse focus pair list into unique ordered tuple of int pairs."""
+    raw_pairs = str(raw_pairs).strip()
+    if raw_pairs == "":
+        return ()
+
+    # Pair separator: ';' (also accept '|').
+    chunks = [c.strip() for c in raw_pairs.replace("|", ";").split(";") if c.strip() != ""]
+    if len(chunks) == 0:
+        return ()
+
+    parsed_pairs: list[tuple[int, int]] = []
+    for chunk in chunks:
+        if "-" in chunk:
+            parts = [p.strip() for p in chunk.split("-")]
+        elif ":" in chunk:
+            parts = [p.strip() for p in chunk.split(":")]
+        elif "/" in chunk:
+            parts = [p.strip() for p in chunk.split("/")]
+        elif "," in chunk:
+            parts = [p.strip() for p in chunk.split(",")]
+        else:
+            raise ValueError(
+                f"Invalid --train_fault_focus_pairs entry '{chunk}'. "
+                "Expected pair format like '7-10' or '7,10'."
+            )
+
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid --train_fault_focus_pairs entry '{chunk}'. "
+                "Expected exactly two motor ids per pair."
+            )
+
+        try:
+            a = int(parts[0])
+            b = int(parts[1])
+        except Exception as e:
+            raise ValueError(
+                f"Invalid --train_fault_focus_pairs entry '{chunk}' (expected integers)."
+            ) from e
+
+        if not (0 <= a < 12) or not (0 <= b < 12):
+            raise ValueError(
+                f"Invalid --train_fault_focus_pairs entry '{chunk}' (expected motor ids in 0..11)."
+            )
+        if a == b:
+            raise ValueError(
+                f"Invalid --train_fault_focus_pairs entry '{chunk}' (pair members must differ)."
+            )
+        parsed_pairs.append((a, b))
+
+    # Keep order but remove duplicates.
+    return tuple(dict.fromkeys(parsed_pairs))
+
+
+def _parse_pair_target_weights(raw_weights: str, num_pairs: int = 6) -> tuple[float, ...]:
+    """Parse comma-separated non-negative weights for mirror-pair target distribution."""
+    raw_weights = str(raw_weights).strip()
+    if raw_weights == "":
+        return ()
+
+    parts = [p.strip() for p in raw_weights.replace(";", ",").split(",") if p.strip() != ""]
+    if len(parts) != int(num_pairs):
+        raise ValueError(
+            f"Invalid --train_fault_pair_target_weights: expected {num_pairs} values, got {len(parts)}."
+        )
+
+    values: list[float] = []
+    for part in parts:
+        try:
+            val = float(part)
+        except Exception as e:
+            raise ValueError(
+                f"Invalid --train_fault_pair_target_weights entry '{part}' (expected float)."
+            ) from e
+        if val < 0.0:
+            raise ValueError(
+                f"Invalid --train_fault_pair_target_weights entry '{part}' (expected >= 0)."
+            )
+        values.append(val)
+
+    if sum(values) <= 0.0:
+        raise ValueError("--train_fault_pair_target_weights sum must be > 0.")
+    return tuple(values)
+
+
+def _resolve_focus_ramp_cfg(args: argparse.Namespace) -> dict | None:
+    """Build validated focus-ramp config from CLI arguments."""
+    fields = (
+        args.train_fault_focus_ramp_start_iter,
+        args.train_fault_focus_ramp_end_iter,
+        args.train_fault_focus_ramp_start_prob,
+        args.train_fault_focus_ramp_end_prob,
+    )
+    if all(v is None for v in fields):
+        return None
+    if any(v is None for v in fields):
+        raise ValueError(
+            "Focus ramp requires all arguments: "
+            "--train_fault_focus_ramp_start_iter, --train_fault_focus_ramp_end_iter, "
+            "--train_fault_focus_ramp_start_prob, --train_fault_focus_ramp_end_prob."
+        )
+
+    start_iter = int(args.train_fault_focus_ramp_start_iter)
+    end_iter = int(args.train_fault_focus_ramp_end_iter)
+    start_prob = float(args.train_fault_focus_ramp_start_prob)
+    end_prob = float(args.train_fault_focus_ramp_end_prob)
+    segment_iters = int(args.train_fault_focus_ramp_segment_iters)
+
+    if start_iter < 0 or end_iter < 0:
+        raise ValueError("Focus ramp iterations must be >= 0.")
+    if end_iter <= start_iter:
+        raise ValueError(
+            f"Invalid focus ramp range: start_iter={start_iter}, end_iter={end_iter}. "
+            "Require end_iter > start_iter."
+        )
+    if not (0.0 <= start_prob <= 1.0):
+        raise ValueError(
+            f"Invalid --train_fault_focus_ramp_start_prob={start_prob} (expected in [0, 1])."
+        )
+    if not (0.0 <= end_prob <= 1.0):
+        raise ValueError(
+            f"Invalid --train_fault_focus_ramp_end_prob={end_prob} (expected in [0, 1])."
+        )
+    if segment_iters <= 0:
+        raise ValueError(
+            f"Invalid --train_fault_focus_ramp_segment_iters={segment_iters} (expected > 0)."
+        )
+
+    return {
+        "start_iter": start_iter,
+        "end_iter": end_iter,
+        "start_prob": start_prob,
+        "end_prob": end_prob,
+        "segment_iters": segment_iters,
+    }
+
+
+def _piecewise_linear_value(
+    iter_idx: int,
+    start_iter: int,
+    end_iter: int,
+    start_value: float,
+    end_value: float,
+) -> float:
+    """Linear interpolation clamped to [start_iter, end_iter]."""
+    if iter_idx <= start_iter:
+        return float(start_value)
+    if iter_idx >= end_iter:
+        return float(end_value)
+    t = float(iter_idx - start_iter) / float(max(end_iter - start_iter, 1))
+    return float(start_value + (end_value - start_value) * t)
+
+
+def _set_env_fault_focus_prob(runner: OnPolicyRunner | DistillationRunner, focus_prob: float) -> bool:
+    """Update runtime env focus probability so reset-time PHM sampling uses new value."""
+    try:
+        env = getattr(runner, "env", None)
+        if env is None:
+            return False
+        base_env = env.unwrapped if hasattr(env, "unwrapped") else env
+        cfg_obj = getattr(base_env, "cfg", None)
+        if cfg_obj is None:
+            return False
+        setattr(cfg_obj, "phm_fault_focus_prob", float(focus_prob))
+        return True
+    except Exception:
+        return False
 
 def _configure_torch_runtime(perf_mode: bool) -> None:
     """Configure backend flags for either reproducibility or throughput."""
@@ -304,15 +685,17 @@ def _set_runner_action_std_cap_only(
 def _learn_with_exploration_schedule(
     runner: OnPolicyRunner | DistillationRunner,
     agent_cfg: RslRlBaseRunnerCfg,
+    focus_ramp_cfg: dict | None = None,
     debug_startup: bool = False,
 ) -> None:
     """
-    Train with staged entropy/action-std schedule.
+    Train with staged entropy/action-std schedule and optional fault-focus ramp.
 
     Default target profile:
       - entropy: 0.01 (iter < 1000), 0.005 (1000~1999), 0.003 (>=2000)
       - action std target-cap: 1.0 (iter < 1000), 0.7 (1000~1999), 0.5 (>=2000)
       - optional late limiter (default on): iter>=2200, segment=20, up=1.02x, down=1.00x(disabled)
+      - optional focus ramp: update reset-time `phm_fault_focus_prob` on configured iteration boundaries
     """
     total_iters = int(agent_cfg.max_iterations)
     if total_iters <= 0:
@@ -364,6 +747,21 @@ def _learn_with_exploration_schedule(
                 while b < final_iter:
                     boundaries.add(b)
                     b += std_late_rate_limit_segment_iters
+    focus_enable = focus_ramp_cfg is not None
+    if focus_enable:
+        fr_start = int(focus_ramp_cfg["start_iter"])
+        fr_end = int(focus_ramp_cfg["end_iter"])
+        fr_seg = max(int(focus_ramp_cfg["segment_iters"]), 1)
+        if start_iter < fr_start < final_iter:
+            boundaries.add(fr_start)
+        if start_iter < fr_end < final_iter:
+            boundaries.add(fr_end)
+        seg_anchor = max(start_iter, fr_start)
+        if seg_anchor < min(fr_end, final_iter):
+            b = seg_anchor + fr_seg
+            while b < min(fr_end, final_iter):
+                boundaries.add(b)
+                b += fr_seg
     phase_bounds = sorted(boundaries)
 
     first_phase = True
@@ -427,6 +825,18 @@ def _learn_with_exploration_schedule(
             if std_set and std_rate_limit_on:
                 std_late_rate_initialized = True
 
+        focus_value = None
+        focus_set = False
+        if focus_enable:
+            focus_value = _piecewise_linear_value(
+                iter_idx=seg_start,
+                start_iter=int(focus_ramp_cfg["start_iter"]),
+                end_iter=int(focus_ramp_cfg["end_iter"]),
+                start_value=float(focus_ramp_cfg["start_prob"]),
+                end_value=float(focus_ramp_cfg["end_prob"]),
+            )
+            focus_set = _set_env_fault_focus_prob(runner, focus_value)
+
         if debug_startup:
             print(
                 "[DBG] Exploration schedule phase "
@@ -436,12 +846,13 @@ def _learn_with_exploration_schedule(
                 f"action_std_current={std_current_mean if std_set else 'N/A'} "
                 f"action_std_prev={std_prev_mean if std_set and std_prev_mean is not None else 'N/A'} "
                 f"action_std_applied={std_applied_mean if std_set else 'N/A'} "
-                f"action_std_rate_limit={'ON' if std_rate_limit_on else 'OFF'}",
+                f"action_std_rate_limit={'ON' if std_rate_limit_on else 'OFF'} "
+                f"fault_focus_prob={focus_value if focus_set else 'N/A'}",
                 flush=True,
             )
         else:
             logging.info(
-                "[TrainSchedule] phase=%d/%d iter=[%d,%d) entropy=%s action_std_target=%s action_std_current=%s action_std_prev=%s action_std_applied=%s action_std_rate_limit=%s",
+                "[TrainSchedule] phase=%d/%d iter=[%d,%d) entropy=%s action_std_target=%s action_std_current=%s action_std_prev=%s action_std_applied=%s action_std_rate_limit=%s fault_focus_prob=%s",
                 phase_idx + 1,
                 len(phase_bounds) - 1,
                 seg_start,
@@ -452,6 +863,7 @@ def _learn_with_exploration_schedule(
                 f"{std_prev_mean:.4f}" if std_set and std_prev_mean is not None else "N/A",
                 f"{std_applied_mean:.4f}" if std_set and std_applied_mean is not None else "N/A",
                 "ON" if std_rate_limit_on else "OFF",
+                f"{focus_value:.4f}" if focus_set and focus_value is not None else "N/A",
             )
 
         runner.learn(num_learning_iterations=seg_iters, init_at_random_ep_len=first_phase)
@@ -524,6 +936,249 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             )
         setattr(env_cfg, "phm_fault_hold_steps", int(args_cli.train_fault_hold_steps))
         logger.info("[Train] Overriding phm_fault_hold_steps=%d", int(args_cli.train_fault_hold_steps))
+    if args_cli.train_fault_focus_prob is not None:
+        focus_prob = float(args_cli.train_fault_focus_prob)
+        if not (0.0 <= focus_prob <= 1.0):
+            raise ValueError(
+                f"Invalid --train_fault_focus_prob={focus_prob} (expected in [0.0, 1.0])."
+            )
+        setattr(env_cfg, "phm_fault_focus_prob", focus_prob)
+        logger.info("[Train] Overriding phm_fault_focus_prob=%.4f", focus_prob)
+    if args_cli.train_fault_pair_weighted_enable is not None:
+        setattr(env_cfg, "phm_fault_pair_weighted_enable", bool(args_cli.train_fault_pair_weighted_enable))
+        logger.info(
+            "[Train] Overriding phm_fault_pair_weighted_enable=%s",
+            bool(args_cli.train_fault_pair_weighted_enable),
+        )
+    if args_cli.train_fault_pair_prob_floor is not None:
+        pair_floor = float(args_cli.train_fault_pair_prob_floor)
+        if not (0.0 <= pair_floor <= 1.0):
+            raise ValueError(
+                f"Invalid --train_fault_pair_prob_floor={pair_floor} (expected in [0.0, 1.0])."
+            )
+        setattr(env_cfg, "phm_fault_pair_prob_floor", pair_floor)
+        logger.info("[Train] Overriding phm_fault_pair_prob_floor=%.4f", pair_floor)
+    if args_cli.train_fault_pair_prob_cap is not None:
+        pair_cap = float(args_cli.train_fault_pair_prob_cap)
+        if not (0.0 <= pair_cap <= 1.0):
+            raise ValueError(
+                f"Invalid --train_fault_pair_prob_cap={pair_cap} (expected in [0.0, 1.0])."
+            )
+        setattr(env_cfg, "phm_fault_pair_prob_cap", pair_cap)
+        logger.info("[Train] Overriding phm_fault_pair_prob_cap=%.4f", pair_cap)
+    if args_cli.train_fault_pair_target_weights is not None:
+        pair_target_weights = _parse_pair_target_weights(args_cli.train_fault_pair_target_weights, num_pairs=6)
+        setattr(env_cfg, "phm_fault_pair_target_weights", pair_target_weights)
+        logger.info("[Train] Overriding phm_fault_pair_target_weights=%s", list(pair_target_weights))
+    if args_cli.train_fault_pair_adaptive_enable is not None:
+        setattr(env_cfg, "phm_fault_pair_adaptive_enable", bool(args_cli.train_fault_pair_adaptive_enable))
+        logger.info(
+            "[Train] Overriding phm_fault_pair_adaptive_enable=%s",
+            bool(args_cli.train_fault_pair_adaptive_enable),
+        )
+    if args_cli.train_fault_pair_adaptive_mix is not None:
+        adaptive_mix = float(args_cli.train_fault_pair_adaptive_mix)
+        if not (0.0 <= adaptive_mix <= 1.0):
+            raise ValueError(
+                f"Invalid --train_fault_pair_adaptive_mix={adaptive_mix} (expected in [0.0, 1.0])."
+            )
+        setattr(env_cfg, "phm_fault_pair_adaptive_mix", adaptive_mix)
+        logger.info("[Train] Overriding phm_fault_pair_adaptive_mix=%.4f", adaptive_mix)
+    if args_cli.train_fault_pair_adaptive_beta is not None:
+        adaptive_beta = float(args_cli.train_fault_pair_adaptive_beta)
+        if adaptive_beta < 0.0:
+            raise ValueError(
+                f"Invalid --train_fault_pair_adaptive_beta={adaptive_beta} (expected >= 0.0)."
+            )
+        setattr(env_cfg, "phm_fault_pair_adaptive_beta", adaptive_beta)
+        logger.info("[Train] Overriding phm_fault_pair_adaptive_beta=%.4f", adaptive_beta)
+    if args_cli.train_fault_pair_adaptive_ema is not None:
+        adaptive_ema = float(args_cli.train_fault_pair_adaptive_ema)
+        if not (0.0 <= adaptive_ema <= 1.0):
+            raise ValueError(
+                f"Invalid --train_fault_pair_adaptive_ema={adaptive_ema} (expected in [0.0, 1.0])."
+            )
+        setattr(env_cfg, "phm_fault_pair_adaptive_ema", adaptive_ema)
+        logger.info("[Train] Overriding phm_fault_pair_adaptive_ema=%.4f", adaptive_ema)
+    if args_cli.train_fault_pair_adaptive_min_episode_per_pair is not None:
+        adaptive_min_ep = float(args_cli.train_fault_pair_adaptive_min_episode_per_pair)
+        if adaptive_min_ep < 1.0:
+            raise ValueError(
+                f"Invalid --train_fault_pair_adaptive_min_episode_per_pair={adaptive_min_ep} (expected >= 1.0)."
+            )
+        setattr(env_cfg, "phm_fault_pair_adaptive_min_episode_per_pair", adaptive_min_ep)
+        logger.info(
+            "[Train] Overriding phm_fault_pair_adaptive_min_episode_per_pair=%.4f",
+            adaptive_min_ep,
+        )
+    if args_cli.train_fault_pair_adaptive_w_fail is not None:
+        w_fail = float(args_cli.train_fault_pair_adaptive_w_fail)
+        if w_fail < 0.0:
+            raise ValueError(
+                f"Invalid --train_fault_pair_adaptive_w_fail={w_fail} (expected >= 0.0)."
+            )
+        setattr(env_cfg, "phm_fault_pair_adaptive_w_fail", w_fail)
+        logger.info("[Train] Overriding phm_fault_pair_adaptive_w_fail=%.4f", w_fail)
+    if args_cli.train_fault_pair_adaptive_w_sat is not None:
+        w_sat = float(args_cli.train_fault_pair_adaptive_w_sat)
+        if w_sat < 0.0:
+            raise ValueError(
+                f"Invalid --train_fault_pair_adaptive_w_sat={w_sat} (expected >= 0.0)."
+            )
+        setattr(env_cfg, "phm_fault_pair_adaptive_w_sat", w_sat)
+        logger.info("[Train] Overriding phm_fault_pair_adaptive_w_sat=%.4f", w_sat)
+    if args_cli.train_fault_pair_adaptive_w_latch is not None:
+        w_latch = float(args_cli.train_fault_pair_adaptive_w_latch)
+        if w_latch < 0.0:
+            raise ValueError(
+                f"Invalid --train_fault_pair_adaptive_w_latch={w_latch} (expected >= 0.0)."
+            )
+        setattr(env_cfg, "phm_fault_pair_adaptive_w_latch", w_latch)
+        logger.info("[Train] Overriding phm_fault_pair_adaptive_w_latch=%.4f", w_latch)
+    if args_cli.train_fault_pair_adaptive_sat_scale is not None:
+        sat_scale = float(args_cli.train_fault_pair_adaptive_sat_scale)
+        if sat_scale <= 0.0:
+            raise ValueError(
+                f"Invalid --train_fault_pair_adaptive_sat_scale={sat_scale} (expected > 0.0)."
+            )
+        setattr(env_cfg, "phm_fault_pair_adaptive_sat_scale", sat_scale)
+        logger.info("[Train] Overriding phm_fault_pair_adaptive_sat_scale=%.4f", sat_scale)
+    adaptive_hint_used = any(
+        x is not None
+        for x in (
+            args_cli.train_fault_pair_adaptive_mix,
+            args_cli.train_fault_pair_adaptive_beta,
+            args_cli.train_fault_pair_adaptive_ema,
+            args_cli.train_fault_pair_adaptive_min_episode_per_pair,
+            args_cli.train_fault_pair_adaptive_w_fail,
+            args_cli.train_fault_pair_adaptive_w_sat,
+            args_cli.train_fault_pair_adaptive_w_latch,
+            args_cli.train_fault_pair_adaptive_sat_scale,
+        )
+    ) or bool(args_cli.train_fault_pair_adaptive_enable is True)
+    if adaptive_hint_used and args_cli.train_fault_pair_adaptive_enable is None:
+        setattr(env_cfg, "phm_fault_pair_adaptive_enable", True)
+        logger.info(
+            "[Train] Auto-enabling phm_fault_pair_adaptive_enable=True "
+            "(adaptive overrides were provided)."
+        )
+    if args_cli.train_fault_motor_adaptive_enable is not None:
+        setattr(env_cfg, "phm_fault_motor_adaptive_enable", bool(args_cli.train_fault_motor_adaptive_enable))
+        logger.info(
+            "[Train] Overriding phm_fault_motor_adaptive_enable=%s",
+            bool(args_cli.train_fault_motor_adaptive_enable),
+        )
+    if args_cli.train_fault_motor_adaptive_topk is not None:
+        motor_topk = int(args_cli.train_fault_motor_adaptive_topk)
+        if motor_topk < 1:
+            raise ValueError(
+                f"Invalid --train_fault_motor_adaptive_topk={motor_topk} (expected >= 1)."
+            )
+        setattr(env_cfg, "phm_fault_motor_adaptive_topk", motor_topk)
+        logger.info("[Train] Overriding phm_fault_motor_adaptive_topk=%d", motor_topk)
+    if args_cli.train_fault_motor_adaptive_min_episode_per_motor is not None:
+        motor_min_ep = float(args_cli.train_fault_motor_adaptive_min_episode_per_motor)
+        if motor_min_ep < 1.0:
+            raise ValueError(
+                f"Invalid --train_fault_motor_adaptive_min_episode_per_motor={motor_min_ep} "
+                "(expected >= 1.0)."
+            )
+        setattr(env_cfg, "phm_fault_motor_adaptive_min_episode_per_motor", motor_min_ep)
+        logger.info(
+            "[Train] Overriding phm_fault_motor_adaptive_min_episode_per_motor=%.4f",
+            motor_min_ep,
+        )
+    motor_adaptive_hint_used = any(
+        x is not None
+        for x in (
+            args_cli.train_fault_motor_adaptive_topk,
+            args_cli.train_fault_motor_adaptive_min_episode_per_motor,
+        )
+    ) or bool(args_cli.train_fault_motor_adaptive_enable is True)
+    if motor_adaptive_hint_used and args_cli.train_fault_motor_adaptive_enable is None:
+        setattr(env_cfg, "phm_fault_motor_adaptive_enable", True)
+        logger.info(
+            "[Train] Auto-enabling phm_fault_motor_adaptive_enable=True "
+            "(motor-adaptive overrides were provided)."
+        )
+
+    pair_weighted_hint_used = any(
+        x is not None
+        for x in (
+            args_cli.train_fault_pair_prob_floor,
+            args_cli.train_fault_pair_prob_cap,
+            args_cli.train_fault_pair_target_weights,
+        )
+    ) or adaptive_hint_used
+    if pair_weighted_hint_used and args_cli.train_fault_pair_weighted_enable is None:
+        setattr(env_cfg, "phm_fault_pair_weighted_enable", True)
+        logger.info(
+            "[Train] Auto-enabling phm_fault_pair_weighted_enable=True "
+            "(pair/adaptive overrides were provided)."
+        )
+    focus_ramp_cfg = _resolve_focus_ramp_cfg(args_cli)
+    focus_prob_effective = float(getattr(env_cfg, "phm_fault_focus_prob", 0.0))
+    focus_enabled = bool(focus_prob_effective > 0.0)
+    if focus_ramp_cfg is not None:
+        focus_enabled = focus_enabled or bool(
+            max(float(focus_ramp_cfg["start_prob"]), float(focus_ramp_cfg["end_prob"])) > 0.0
+        )
+
+    focus_pairs_override: tuple[tuple[int, int], ...] | None = None
+    if args_cli.train_fault_focus_pairs is not None:
+        focus_pairs_override = _parse_focus_pairs(args_cli.train_fault_focus_pairs)
+    elif (
+        args_cli.train_fault_focus_motor_ids is None
+        and args_cli.train_fault_focus_pairs is None
+        and not bool(getattr(env_cfg, "phm_fault_motor_adaptive_enable", False))
+    ):
+        # Safe default: use all mirror pairs unless the user supplied selectors
+        # or enabled motor-adaptive focus instead.
+        focus_pairs_override = _FOCUS_ALL_MIRROR_PAIRS_12
+        logger.info(
+            "[Train] Auto default focus pairs enabled: %s",
+            list(focus_pairs_override),
+        )
+
+    if focus_pairs_override is not None:
+        setattr(env_cfg, "phm_fault_focus_pairs", focus_pairs_override)
+        logger.info("[Train] Overriding phm_fault_focus_pairs=%s", list(focus_pairs_override))
+    if args_cli.train_fault_focus_motor_ids is not None:
+        focus_motor_ids = _parse_focus_motor_ids(args_cli.train_fault_focus_motor_ids)
+        setattr(env_cfg, "phm_fault_focus_motor_ids", focus_motor_ids)
+        logger.info("[Train] Overriding phm_fault_focus_motor_ids=%s", list(focus_motor_ids))
+    elif focus_pairs_override is not None:
+        # For visibility in logs/metadata, mirror pair selection into flattened motor-id list.
+        flattened: list[int] = []
+        for a, b in focus_pairs_override:
+            flattened.append(int(a))
+            flattened.append(int(b))
+        auto_ids = tuple(dict.fromkeys(flattened))
+        setattr(env_cfg, "phm_fault_focus_motor_ids", auto_ids)
+        logger.info(
+            "[Train] Auto-derived phm_fault_focus_motor_ids from pairs=%s",
+            list(auto_ids),
+        )
+    if focus_ramp_cfg is not None:
+        if args_cli.train_fault_mode == "single_motor_fixed" or train_fault_motor_id >= 0:
+            logger.warning(
+                "[Train] Focus ramp is configured but fault mode is fixed-motor; "
+                "ramp effect will be minimal/non-applicable."
+            )
+        if args_cli.train_fault_focus_prob is not None:
+            logger.info(
+                "[Train] Focus ramp is enabled and will override constant phm_fault_focus_prob during training."
+            )
+        # Set initial cfg value for transparency in dumped env.yaml and first reset.
+        setattr(env_cfg, "phm_fault_focus_prob", float(focus_ramp_cfg["start_prob"]))
+        logger.info(
+            "[Train] Focus ramp configured: iter %d -> %d, prob %.4f -> %.4f, segment=%d",
+            int(focus_ramp_cfg["start_iter"]),
+            int(focus_ramp_cfg["end_iter"]),
+            float(focus_ramp_cfg["start_prob"]),
+            float(focus_ramp_cfg["end_prob"]),
+            int(focus_ramp_cfg["segment_iters"]),
+        )
     # check for invalid combination of CPU device with distributed training
     if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
@@ -659,7 +1314,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flush=True,
         )
     if agent_cfg.class_name == "OnPolicyRunner":
-        _learn_with_exploration_schedule(runner, agent_cfg, debug_startup=debug_startup)
+        _learn_with_exploration_schedule(
+            runner,
+            agent_cfg,
+            focus_ramp_cfg=focus_ramp_cfg,
+            debug_startup=debug_startup,
+        )
     else:
         runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
 
