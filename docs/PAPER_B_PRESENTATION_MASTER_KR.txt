@@ -1,0 +1,480 @@
+Paper B Presentation Master
+발표 원고 + 코드 질의 대응 통합 마스터
+작성일: 2026-03-09
+
+========================================================================
+문서 목적
+========================================================================
+
+이 문서는 Paper B 발표를 위한 active master 문서다.
+역할은 아래 세 가지다.
+
+1. 발표 슬라이드 구조를 고정한다.
+2. 발표자가 반복해서 써야 하는 문장을 고정한다.
+3. 코드 질문에 대한 답변 프레임을 고정한다.
+
+이 문서는 더 이상 옛 distillation 중심 서사, replay 평가 중심 서사, PHM 플랫폼 소개 문서를 따르지 않는다.
+발표의 중심은 아래 한 문장이다.
+
+"배치 가능한 measurable-only channels만으로 motor degradation 하의 safety benefit을 얼마나 회복할 수 있는가."
+
+========================================================================
+0. 발표 전에 고정해야 할 사실
+========================================================================
+
+0.1 제목
+- `Real-Observable Safety Locomotion under Motor Degradation`
+
+0.2 메인 비교 사다리
+- `Baseline`
+- `RealObs-ObsOnly`
+- `RealObs-Full`
+- `Strategic PHM`
+
+0.3 사이드 실험
+- `RealObs-TempDose`
+- `RealObs-Full governor off/on`
+
+0.4 public task ID
+- `Unitree-Go2-Baseline-v1`
+- `Unitree-Go2-ObsOnly-v1`
+- `Unitree-Go2-RealObs-v1`
+- `Unitree-Go2-Strategic-v1`
+- `Unitree-Go2-TempDose-v1`
+
+0.5 핵심 경로
+- registry:
+  `unitree_go2_realobs/source/unitree_go2_realobs/unitree_go2_realobs/tasks/manager_based/unitree_go2_realobs/__init__.py`
+- env runtime:
+  `unitree_go2_realobs/source/unitree_go2_realobs/unitree_go2_realobs/tasks/manager_based/unitree_go2_realobs/unitree_go2_motor_deg_env.py`
+- baseline cfg:
+  `unitree_go2_realobs/source/unitree_go2_realobs/unitree_go2_realobs/tasks/manager_based/unitree_go2_realobs/unitree_go2_baseline_env_cfg.py`
+- obsonly cfg:
+  `unitree_go2_realobs/source/unitree_go2_realobs/unitree_go2_realobs/tasks/manager_based/unitree_go2_realobs/unitree_go2_obsonly_env_cfg.py`
+- realobs cfg:
+  `unitree_go2_realobs/source/unitree_go2_realobs/unitree_go2_realobs/tasks/manager_based/unitree_go2_realobs/unitree_go2_realobs_env_cfg.py`
+- strategic cfg:
+  `unitree_go2_realobs/source/unitree_go2_realobs/unitree_go2_realobs/tasks/manager_based/unitree_go2_realobs/unitree_go2_strategic_env_cfg.py`
+- tempdose cfg:
+  `unitree_go2_realobs/source/unitree_go2_realobs/unitree_go2_realobs/tasks/manager_based/unitree_go2_realobs/unitree_go2_tempdose_env_cfg.py`
+- observable signals:
+  `unitree_go2_realobs/source/unitree_go2_realobs/unitree_go2_realobs/tasks/manager_based/unitree_go2_realobs/mdp/observations/observable_signals.py`
+- safety rewards:
+  `unitree_go2_realobs/source/unitree_go2_realobs/unitree_go2_realobs/tasks/manager_based/unitree_go2_realobs/mdp/rewards/degradation.py`
+- train/eval:
+  `unitree_go2_realobs/scripts/rsl_rl/train.py`
+  `unitree_go2_realobs/scripts/rsl_rl/evaluate.py`
+- wrappers:
+  `unitree_go2_realobs/scripts/rsl_rl/run_paper_b_core_train.sh`
+  `unitree_go2_realobs/scripts/rsl_rl/run_paper_b_core_eval.sh`
+- real integration:
+  `unitree_go2_realobs/scripts/real/run_governor_live_template.py`
+  `unitree_go2_realobs/scripts/real/offline_governor_eval_from_log.py`
+  `unitree_go2_realobs/scripts/rsl_rl/governor_utils.py`
+
+========================================================================
+1. 발표 운영 규칙
+========================================================================
+
+1. 첫 1분 안에 quartet을 보여준다.
+2. `Baseline` 설명에는 반드시 `same degraded physics`를 넣는다.
+3. `Strategic`는 반드시 `privileged upper bound`라고 먼저 규정한다.
+4. `TempDose`는 메인 결과가 아니라 side ablation으로만 설명한다.
+5. 실로봇 파트는 policy superiority claim이 아니라 deployment alignment evidence라고 설명한다.
+6. 코드 질문이 나오면 line number보다 파일 책임과 data flow로 답한다.
+
+========================================================================
+2. 30초 오프닝 스크립트
+========================================================================
+
+"이번 작업의 질문은 fault-aware policy를 하나 더 만드는 것이 아닙니다."
+"실제로 배치 가능한 measurable-only channels만으로 motor degradation 하의 safety benefit을 얼마나 회복할 수 있는지를 묻습니다."
+"그래서 논문은 Base, ObsOnly, RealObs, Strategic의 비교 사다리를 중심으로 설계했고,"
+"실로봇 로그와 governor 분석은 그 사다리의 deployment alignment를 보강하는 역할로 둡니다."
+
+========================================================================
+3. 메인 덱 구성
+========================================================================
+
+권장 메인 덱은 14장이다.
+
+1. Title
+2. Problem and paper question
+3. Comparison ladder
+4. Environment and degradation setting
+5. Real-observable signal design
+6. Method variants
+7. Training and evaluation protocol
+8. Main result: quartet
+9. Fixed motor sweep
+10. Channel ablation
+11. Sensor realism ablation
+12. Governor supplementary
+13. Real-log alignment
+14. Conclusion
+
+백업 슬라이드는 6장 정도면 충분하다.
+
+1. TempDose
+2. failure cases
+3. metric semantics
+4. wrapper and runtime flags
+5. real integration flow
+6. limitations
+
+========================================================================
+4. 슬라이드별 운영안
+========================================================================
+
+----------------------------------------------------------------------
+S01. Title
+----------------------------------------------------------------------
+핵심 메시지:
+- 이 논문은 real-observable safety locomotion을 다룬다.
+
+화면:
+- 제목
+- 저자
+- 한 줄 부제:
+  `Measurable-only safety recovery under motor degradation`
+
+원고:
+- "오늘 발표는 motor degradation 상황에서 observable-only measurable channels만으로 안전성과 추종성을 얼마나 회복할 수 있는지에 대한 내용입니다."
+
+질문:
+- "왜 real-observable을 제목에 넣었나?"
+
+답:
+- "논문의 핵심이 privileged state estimation이 아니라 measurable-only deployment design이기 때문입니다."
+
+----------------------------------------------------------------------
+S02. Problem and paper question
+----------------------------------------------------------------------
+핵심 메시지:
+- 문제는 열화 자체보다, 열화 조건에서 무엇을 실제로 볼 수 있느냐이다.
+
+화면:
+- motor degradation
+- temperature rise
+- voltage sag
+- deployment constraint: measurable channels only
+
+원고:
+- "많은 fault-aware 접근은 숨은 health state를 가정합니다."
+- "우리는 그 대신 실제 센서로 얻을 수 있는 채널만으로 safety benefit을 회복할 수 있는지를 봅니다."
+
+코드 근거:
+- `observable_signals.py`
+- `unitree_go2_realobs_env_cfg.py`
+
+----------------------------------------------------------------------
+S03. Comparison ladder
+----------------------------------------------------------------------
+핵심 메시지:
+- 이 논문은 차이를 하나씩 분해한다.
+
+화면:
+- Base -> ObsOnly -> RealObs -> Strategic
+
+원고:
+- "Baseline은 same degraded physics이지만 hidden degradation observation과 degradation-aware reward가 없습니다."
+- "ObsOnly는 measurable observation contribution만 봅니다."
+- "RealObs는 여기에 observable safety reward를 더합니다."
+- "Strategic은 privileged upper bound입니다."
+
+질문:
+- "Baseline이 clean locomotion baseline인가?"
+
+답:
+- "아닙니다. physics는 동일합니다. 비교를 공정하게 만들기 위해 정책이 보는 정보와 reward만 바꿉니다."
+
+----------------------------------------------------------------------
+S04. Environment and degradation setting
+----------------------------------------------------------------------
+핵심 메시지:
+- train과 eval의 차이는 distribution vs identification이다.
+
+화면:
+- train: `single_motor_random`
+- eval: `single_motor_fixed`
+- motor id `0..11`
+
+원고:
+- "학습은 분포 위에서 하고, 평가는 12개 motor를 고정해 어떤 모터가 취약한지 분해합니다."
+
+코드 근거:
+- `unitree_go2_motor_deg_env.py`
+- `evaluate.py`
+- `run_paper_b_core_eval.sh`
+
+----------------------------------------------------------------------
+S05. Real-observable signal design
+----------------------------------------------------------------------
+핵심 메시지:
+- 정책 관측은 measurable-only로 제한된다.
+
+화면:
+- voltage
+- thermal proxy
+- vibration/contact/IMU
+
+원고:
+- "핵심은 내부 coil hotspot 같은 직접 불가능한 상태를 본편 정책의 관측에 넣지 않는다는 점입니다."
+
+질문:
+- "왜 thermal proxy를 쓰나?"
+
+답:
+- "실배치에서 직접 관측 가능한 thermal signal에 맞추기 위해서입니다."
+
+----------------------------------------------------------------------
+S06. Method variants
+----------------------------------------------------------------------
+핵심 메시지:
+- variant 차이는 observation과 reward 두 축으로만 읽히게 만든다.
+
+화면:
+- variant matrix:
+  Base / ObsOnly / RealObs / Strategic / TempDose
+
+원고:
+- "ObsOnly가 있어야 measurable observation의 효과와 safety reward의 효과를 분리할 수 있습니다."
+
+코드 근거:
+- `unitree_go2_baseline_env_cfg.py`
+- `unitree_go2_obsonly_env_cfg.py`
+- `unitree_go2_realobs_env_cfg.py`
+- `unitree_go2_strategic_env_cfg.py`
+- `unitree_go2_tempdose_env_cfg.py`
+
+----------------------------------------------------------------------
+S07. Training and evaluation protocol
+----------------------------------------------------------------------
+핵심 메시지:
+- 메인 표는 재현 가능한 wrapper 기반 프로토콜로 고정돼 있다.
+
+화면:
+- `run_paper_b_core_train.sh`
+- `run_paper_b_core_eval.sh`
+- `summarize_motor_sweep.py`
+
+원고:
+- "메인 프로토콜은 governor off, fixed 12-motor sweep, strict evaluation입니다."
+- "governor on/off와 TempDose는 supplementary로만 다룹니다."
+
+질문:
+- "왜 governor를 메인에 안 넣나?"
+
+답:
+- "정책 효과와 runtime intervention 효과를 분리하기 위해서입니다."
+
+----------------------------------------------------------------------
+S08. Main result: quartet
+----------------------------------------------------------------------
+핵심 메시지:
+- 논문의 중심은 quartet 결과다.
+
+화면:
+- quartet bar chart
+- mean +/- std
+
+원고:
+- "여기서 핵심은 Base 대비 ObsOnly 개선, ObsOnly 대비 RealObs 추가 개선, 그리고 Strategic과의 잔여 gap입니다."
+
+질문:
+- "왜 Strategic을 같이 넣나?"
+
+답:
+- "observable-only design이 privileged upper bound와 얼마나 떨어져 있는지 정량화하기 위해서입니다."
+
+----------------------------------------------------------------------
+S09. Fixed motor sweep
+----------------------------------------------------------------------
+핵심 메시지:
+- 평균 성능만으로는 보이지 않는 motor-specific weakness를 드러낸다.
+
+화면:
+- 12-motor heatmap
+
+원고:
+- "이 결과는 단순 평균보다 어떤 motor에서 무너지는지, front-leg bias가 있는지 같은 구조적 정보를 줍니다."
+
+코드 근거:
+- `run_paper_b_core_eval.sh`
+- `summarize_motor_sweep.py`
+
+----------------------------------------------------------------------
+S10. Channel ablation
+----------------------------------------------------------------------
+핵심 메시지:
+- 어떤 measurable channel이 중요한지 분해한다.
+
+화면:
+- no_voltage
+- no_thermal
+- no_vibration
+
+원고:
+- "이 실험은 센서 우선순위를 보여줍니다. 특히 어느 채널이 safety recovery에 핵심인지 분리할 수 있습니다."
+
+코드 근거:
+- `paper_b_runtime.py`
+- `train.py`
+- `evaluate.py`
+
+----------------------------------------------------------------------
+S11. Sensor realism ablation
+----------------------------------------------------------------------
+핵심 메시지:
+- 성능이 채널 존재 때문인지, 현실적 corruption 하에서도 유지되는지를 분리한다.
+
+화면:
+- ideal
+- full
+- voltage_only
+- encoder_transport
+
+원고:
+- "real-observable이라는 말에는 measurable channel뿐 아니라 corruption realism도 포함됩니다."
+
+----------------------------------------------------------------------
+S12. Governor supplementary
+----------------------------------------------------------------------
+핵심 메시지:
+- governor는 deployment safety layer이지 정책 본체가 아니다.
+
+화면:
+- RealObs gov off vs on
+- temp margin
+- voltage margin
+
+원고:
+- "이 결과는 정책 메인 표가 아니라 deployment safety supplementary입니다."
+
+코드 근거:
+- `governor_utils.py`
+- `run_governor_live_template.py`
+- `offline_governor_eval_from_log.py`
+
+----------------------------------------------------------------------
+S13. Real-log alignment
+----------------------------------------------------------------------
+핵심 메시지:
+- 실로봇 로그는 metric semantics와 threshold 적합성의 근거다.
+
+화면:
+- raw 500Hz log
+- 50Hz steps.csv
+- summary.json
+
+원고:
+- "실로봇 파트는 policy superiority claim이 아니라 threshold와 runtime safety semantics를 보강하는 evidence입니다."
+
+질문:
+- "실로봇에서 이미 superiority가 입증됐나?"
+
+답:
+- "아직 그 수준의 주장은 하지 않습니다. 현재 역할은 metric alignment와 governor behavior 검증입니다."
+
+----------------------------------------------------------------------
+S14. Conclusion
+----------------------------------------------------------------------
+핵심 메시지:
+- deployment-aligned measurable design이 메인 메시지다.
+
+원고:
+- "정리하면 이 논문은 privileged degradation policy를 제안하는 것이 아니라 measurable-only safety locomotion이 어디까지 가능한지를 보여주는 작업입니다."
+
+========================================================================
+5. 발표자가 반복해서 써야 하는 고정 문장
+========================================================================
+
+1. "Baseline은 same degraded physics입니다."
+2. "ObsOnly는 measurable observation contribution을 분리하기 위한 variant입니다."
+3. "RealObs는 measurable-only observation과 observable safety reward를 함께 둔 메인 정책입니다."
+4. "Strategic은 privileged upper bound이며 deployment policy claim의 대상이 아닙니다."
+5. "TempDose는 메인 결과가 아니라 thermal semantics side ablation입니다."
+6. "실로봇 파트는 superiority proof가 아니라 deployment alignment evidence입니다."
+
+========================================================================
+6. 실험 설명 템플릿
+========================================================================
+
+메인 결과 설명 순서:
+
+1. Base 대비 ObsOnly 개선이 있는가
+2. ObsOnly 대비 RealObs 추가 이득이 있는가
+3. Strategic과의 gap이 얼마나 남는가
+4. 어떤 motor에서 gap이 커지는가
+
+ablation 설명 순서:
+
+1. no_voltage
+2. no_thermal
+3. no_vibration
+4. ideal vs full
+5. governor off vs on
+
+========================================================================
+7. 교수님 질문 대응
+========================================================================
+
+Q1. "이게 그냥 fault-tolerant RL 아닌가?"
+A1.
+"부분적으로는 맞지만, 이 논문은 privileged state 접근보다 observable-only deployment condition을 중심으로 문제를 재정의한다는 점이 다릅니다."
+
+Q2. "Strategic이 더 좋으면 그걸 쓰면 되는 것 아닌가?"
+A2.
+"Strategic은 privileged upper bound입니다. 논문의 main question은 observable-only 조건에서 얼마나 회복되느냐입니다."
+
+Q3. "Baseline이 너무 약한 것 아닌가?"
+A3.
+"그렇지 않습니다. same degraded physics이고 정보와 reward만 제거했기 때문에 공정한 comparator입니다."
+
+Q4. "TempDose가 더 좋으면 그게 main 아닌가?"
+A4.
+"아닙니다. TempDose는 thermal semantics side ablation입니다. 메인 논지는 measurable-only real-observable design입니다."
+
+Q5. "실로봇 검증이 부족한 것 아닌가?"
+A5.
+"맞습니다. 그래서 실로봇 파트의 역할을 policy superiority claim이 아니라 threshold and governor alignment evidence로 제한합니다."
+
+========================================================================
+8. 백업 슬라이드 추천
+========================================================================
+
+B01. Task registry and variant map
+- `__init__.py`
+
+B02. RealObs observation channels
+- `observable_signals.py`
+
+B03. Runtime flags and overrides
+- `paper_b_runtime.py`
+
+B04. Train/eval wrappers
+- `run_paper_b_core_train.sh`
+- `run_paper_b_core_eval.sh`
+
+B05. Real integration flow
+- `unitree_go2_realobs/scripts/real/README.md`
+- `third_party/PAPER_B_REAL_LOG_RUNBOOK_KR.txt`
+
+B06. TempDose semantics
+- `unitree_go2_tempdose_env_cfg.py`
+
+========================================================================
+9. 발표 직전 체크리스트
+========================================================================
+
+1. 제목이 `Real-Observable Safety Locomotion under Motor Degradation`로 되어 있는가
+2. quartet 그림이 발표 초반부에 나오는가
+3. Baseline 설명에 `same degraded physics`가 포함되는가
+4. Strategic을 upper bound로만 설명하는가
+5. TempDose를 side ablation으로 밀어냈는가
+6. 실로봇 파트가 overclaim하지 않는가
+7. 모든 코드 경로가 현재 repo 구조와 맞는가
+
+========================================================================
+끝
+========================================================================

@@ -9,9 +9,14 @@ venv/
 .env
 
 # Isaac/RL runtime artifacts
+logs/
+outputs/
+*.egg-info/
 unitree_go2_phm/scripts/rsl_rl/logs/
 unitree_go2_phm/scripts/rsl_rl/outputs/
 unitree_go2_phm/scripts/rsl_rl/auto_reward_tuning/
+unitree_go2_phm/scripts/rsl_rl/eval_results/
+unitree_go2_phm/scripts/rsl_rl/*.launch.log
 
 # Local real-run artifacts
 real_runs/
