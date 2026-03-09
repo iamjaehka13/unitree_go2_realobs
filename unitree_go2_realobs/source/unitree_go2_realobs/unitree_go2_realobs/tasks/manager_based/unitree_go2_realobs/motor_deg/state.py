@@ -4,7 +4,7 @@
 # =============================================================================
 from __future__ import annotations
 import torch
-from .constants import T_AMB
+from .constants import T_AMB, CELL_INTERNAL_RESISTANCE_NOMINAL
 
 class MotorDegState:
     """
@@ -43,7 +43,9 @@ class MotorDegState:
         self.bms_cell_voltages = self.cell_voltage
         # Per-cell model parameters (episode-randomized in reset_motor_deg_interface).
         self.cell_ocv_bias = torch.zeros((num_envs, 8), device=device, dtype=torch.float32)
-        self.cell_internal_resistance = torch.full((num_envs, 8), 0.0045, device=device, dtype=torch.float32)
+        self.cell_internal_resistance = torch.full(
+            (num_envs, 8), CELL_INTERNAL_RESISTANCE_NOMINAL, device=device, dtype=torch.float32
+        )
         self.cell_sensor_bias = torch.zeros((num_envs, 8), device=device, dtype=torch.float32)
         
         # Aliasing 방지를 위한 Control Step 동안의 평균 전력
@@ -144,7 +146,7 @@ class MotorDegState:
         self.battery_voltage_true[env_ids] = 33.6
         self.cell_voltage[env_ids] = 4.2
         self.cell_ocv_bias[env_ids] = 0.0
-        self.cell_internal_resistance[env_ids] = 0.0045
+        self.cell_internal_resistance[env_ids] = CELL_INTERNAL_RESISTANCE_NOMINAL
         self.cell_sensor_bias[env_ids] = 0.0
         self.instant_power[env_ids] = 0.0
         self.avg_power_log[env_ids] = 0.0

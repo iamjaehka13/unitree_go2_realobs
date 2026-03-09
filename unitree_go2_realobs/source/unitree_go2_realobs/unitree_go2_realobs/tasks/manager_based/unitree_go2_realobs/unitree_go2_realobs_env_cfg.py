@@ -10,6 +10,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import GaussianNoiseCfg, UniformNoiseCfg
 
 from . import mdp as deg_mdp
+from .paper_b_task_contract import validate_paper_b_task_cfg
 from .unitree_go2_motor_deg_env import UnitreeGo2MotorDegEnv
 from .unitree_go2_strategic_env_cfg import (
     ActionsCfg,
@@ -223,6 +224,11 @@ class RealObsTerminationsCfg(TerminationsCfg):
 @configclass
 class UnitreeGo2RealObsEnvCfg(ManagerBasedRLEnvCfg):
     class_type = UnitreeGo2MotorDegEnv
+    paper_b_family: str = "main_ladder"
+    paper_b_variant: str = "realobs"
+    paper_b_observation_scope: str = "measurable_only"
+    paper_b_reward_scope: str = "measurable_proxy"
+    paper_b_deployable: bool = True
     scene: UnitreeGo2StrategicSceneCfg = UnitreeGo2StrategicSceneCfg(num_envs=4096, env_spacing=2.5)
 
     observations: RealObsObservationsCfg = RealObsObservationsCfg()
@@ -241,6 +247,13 @@ class UnitreeGo2RealObsEnvCfg(ManagerBasedRLEnvCfg):
     motor_deg_curriculum_aged_end_iter: int = 2400
     motor_deg_curriculum_critical_end_iter: int = 2800
     motor_deg_curriculum_final_end_iter: int = 3000
+    # RealObs observation contract:
+    # - require explicit measurable sensor/proxy tensors
+    # - disallow hidden-state fallbacks unless explicitly re-enabled for debugging
+    realobs_require_voltage_sensor: bool = True
+    realobs_allow_true_voltage_fallback: bool = False
+    realobs_require_case_temperature_proxy: bool = True
+    realobs_allow_case_temperature_from_coil_fallback: bool = False
     # Explicit metric semantics for logs/evaluate (avoid implicit dependence on termination cfg).
     temperature_metric_semantics: str = "case_proxy"
     motor_deg_fault_injection_mode: str = "single_motor_random"
@@ -316,7 +329,7 @@ class UnitreeGo2RealObsEnvCfg(ManagerBasedRLEnvCfg):
     battery_voltage_quant_step_v: float = 0.01
     cell_voltage_quant_step_v: float = 0.005
     cell_ocv_bias_range_v: tuple[float, float] = (-0.015, 0.015)
-    cell_ir_range_ohm: tuple[float, float] = (0.0035, 0.0065)
+    cell_ir_range_ohm: tuple[float, float] = (0.0060, 0.0090)
     cell_sensor_bias_range_v: tuple[float, float] = (-0.010, 0.010)
     velocity_cmd_curriculum_enable: bool = True
     velocity_cmd_curriculum_start_iter: int = 160
@@ -372,3 +385,4 @@ class UnitreeGo2RealObsEnvCfg(ManagerBasedRLEnvCfg):
         # Keep voltage-budget observation deterministic and realistic for replay/real transfer.
         self.commands.risk_factor.minimum = 1.0
         self.commands.risk_factor.maximum = 1.0
+        validate_paper_b_task_cfg(self)

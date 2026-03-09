@@ -20,6 +20,7 @@ unitree_go2_phm/scripts/rsl_rl/*.launch.log
 
 # Local real-run artifacts
 real_runs/
+realdata/
 go2_full_log.csv
 *.bag
 *.db3

@@ -40,18 +40,22 @@ parser.add_argument(
     help="Override critical command governor enable state for Paper B evaluation.",
 )
 parser.add_argument(
+    "--paper_b_obs_ablation",
     "--realobs_obs_ablation",
+    dest="paper_b_obs_ablation",
     type=str,
     default="none",
     choices=["none", "no_voltage", "no_thermal", "no_vibration"],
-    help="Paper B observation-channel ablation for RealObs-family tasks.",
+    help="Paper B observation-channel ablation.",
 )
 parser.add_argument(
+    "--paper_b_sensor_preset",
     "--realobs_sensor_preset",
+    dest="paper_b_sensor_preset",
     type=str,
     default="full",
     choices=["full", "ideal", "voltage_only", "encoder_transport"],
-    help="Paper B sensor-realism preset for RealObs-family tasks.",
+    help="Paper B sensor-realism preset.",
 )
 parser.add_argument(
     "--eval_fault_mode",
@@ -360,6 +364,12 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import unitree_go2_realobs.tasks  # noqa: F401
+from unitree_go2_realobs.tasks.manager_based.unitree_go2_realobs.paper_b_task_contract import (
+    summarize_paper_b_task_cfg,
+)
+from unitree_go2_realobs.tasks.manager_based.unitree_go2_realobs.mdp.realobs_contract import (
+    resolve_realobs_case_temperature_tensor,
+)
 from unitree_go2_realobs.tasks.manager_based.unitree_go2_realobs.motor_deg.interface import (
     case_proxy_safe_coil_max_for_reset,
     thermal_termination_params_from_cfg,
@@ -694,11 +704,12 @@ def _temperature_tensor_for_eval(base_env) -> torch.Tensor:
     _, _, coil_to_case_delta_c = _thermal_failure_params(base_env)
     temp_semantics = _temperature_metric_semantics(base_env)
     if temp_semantics == "case_proxy":
-        case_temp = _case_temperature_tensor(deg_state)
+        case_temp, _ = resolve_realobs_case_temperature_tensor(
+            base_env,
+            coil_to_case_delta_c=coil_to_case_delta_c,
+        )
         if case_temp is not None:
             return case_temp
-        if hasattr(deg_state, "coil_temp"):
-            return deg_state.coil_temp - float(coil_to_case_delta_c)
     return deg_state.coil_temp
 
 
@@ -2926,8 +2937,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     paper_b_runtime_cfg = apply_paper_b_runtime_overrides(
         env_cfg,
         critical_governor_enable=args_cli.critical_governor_enable,
-        realobs_obs_ablation=args_cli.realobs_obs_ablation,
-        realobs_sensor_preset=args_cli.realobs_sensor_preset,
+        paper_b_obs_ablation=args_cli.paper_b_obs_ablation,
+        paper_b_sensor_preset=args_cli.paper_b_sensor_preset,
     )
 
     # Create environment
@@ -3118,11 +3129,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         else None
     )
 
+    paper_b_contract_summary = summarize_paper_b_task_cfg(env.unwrapped.cfg)
     eval_meta = {
         "task": args_cli.task,
         "paper_b_obs_ablation": str(getattr(env.unwrapped.cfg, "paper_b_obs_ablation", "none")),
         "paper_b_sensor_preset": str(getattr(env.unwrapped.cfg, "paper_b_sensor_preset", "full")),
         "paper_b_runtime_overrides": paper_b_runtime_cfg,
+        "paper_b_family": str(paper_b_contract_summary["paper_b_family"]),
+        "paper_b_variant": str(paper_b_contract_summary["paper_b_variant"]),
+        "paper_b_observation_scope": str(paper_b_contract_summary["paper_b_observation_scope"]),
+        "paper_b_reward_scope": str(paper_b_contract_summary["paper_b_reward_scope"]),
+        "paper_b_deployable": bool(paper_b_contract_summary["paper_b_deployable"]),
+        "realobs_require_voltage_sensor": bool(getattr(env.unwrapped.cfg, "realobs_require_voltage_sensor", False)),
+        "realobs_allow_true_voltage_fallback": bool(
+            getattr(env.unwrapped.cfg, "realobs_allow_true_voltage_fallback", False)
+        ),
+        "realobs_require_case_temperature_proxy": bool(
+            getattr(env.unwrapped.cfg, "realobs_require_case_temperature_proxy", False)
+        ),
+        "realobs_allow_case_temperature_from_coil_fallback": bool(
+            getattr(env.unwrapped.cfg, "realobs_allow_case_temperature_from_coil_fallback", False)
+        ),
+        "realobs_voltage_source_effective": str(getattr(env.unwrapped, "_realobs_voltage_source", "n/a")),
+        "realobs_case_temperature_source_effective": str(
+            getattr(env.unwrapped, "_realobs_case_temperature_source", "n/a")
+        ),
         "temperature_metric_semantics": temp_metric_semantics,
         "temperature_metric_field": f"final_max_temp_{temp_metric_semantics}",
         "thermal_termination_threshold_c": float(threshold_temp) if threshold_temp is not None else None,

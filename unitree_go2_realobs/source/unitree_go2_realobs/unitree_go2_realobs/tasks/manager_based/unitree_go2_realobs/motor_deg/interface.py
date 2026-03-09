@@ -571,7 +571,7 @@ def update_motor_deg_dynamics(env: ManagerBasedRLEnv, dt: float, env_ids: Option
 
             cell_ir = getattr(env.motor_deg_state, "cell_internal_resistance", None)
             if not isinstance(cell_ir, torch.Tensor):
-                cell_ir = torch.full((len(current_soc), 8), 0.0045, device=env.device, dtype=torch.float32)
+                cell_ir = torch.full((len(current_soc), 8), 0.0075, device=env.device, dtype=torch.float32)
             else:
                 cell_ir = cell_ir[env_ids]
 
@@ -1030,7 +1030,7 @@ def reset_motor_deg_interface(env: ManagerBasedRLEnv, env_ids: torch.Tensor):
     # Cell-level DR parameters (for measurable min-cell voltage channel realism).
     cfg_obj = getattr(env, "cfg", None)
     cell_bias_range = getattr(cfg_obj, "cell_ocv_bias_range_v", (-0.015, 0.015))
-    cell_ir_range = getattr(cfg_obj, "cell_ir_range_ohm", (0.0035, 0.0065))
+    cell_ir_range = getattr(cfg_obj, "cell_ir_range_ohm", (0.0060, 0.0090))
     cell_sensor_bias_range = getattr(cfg_obj, "cell_sensor_bias_range_v", (-0.010, 0.010))
 
     if hasattr(env.motor_deg_state, "cell_ocv_bias"):

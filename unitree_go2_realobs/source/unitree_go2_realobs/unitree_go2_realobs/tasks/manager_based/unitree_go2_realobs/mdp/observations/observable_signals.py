@@ -24,6 +24,11 @@ if TYPE_CHECKING:
 # [Core] Shared Utilities & Constants
 from ...motor_deg.utils import safe_tensor
 from ...motor_deg import constants as motor_deg_const
+from ..realobs_contract import (
+    resolve_realobs_case_temperature_rate_tensor,
+    resolve_realobs_case_temperature_tensor,
+    resolve_realobs_voltage_tensor,
+)
 
 # =============================================================================
 # 1. Component Loss Analysis (Data Fetchers)
@@ -131,15 +136,8 @@ def available_voltage_budget_realobs(
     RealObs policy should not depend on hidden model-predicted channels such as
     `bms_voltage_pred`. Prefer measured sensor channels (`battery_voltage`).
     """
-    if not hasattr(env, "motor_deg_state"):
-        return torch.zeros((env.num_envs, 1), device=env.device)
-
-    if hasattr(env.motor_deg_state, "battery_voltage"):
-        current_v = env.motor_deg_state.battery_voltage.unsqueeze(-1)
-    elif hasattr(env.motor_deg_state, "battery_voltage_true"):
-        # Fallback for environments that only expose true-voltage channel.
-        current_v = env.motor_deg_state.battery_voltage_true.unsqueeze(-1)
-    else:
+    current_v, _ = resolve_realobs_voltage_tensor(env)
+    if current_v is None:
         return torch.zeros((env.num_envs, 1), device=env.device)
 
     headroom = torch.clamp(current_v - cutoff_voltage, min=0.0)
@@ -157,9 +155,9 @@ def thermal_stress_realobs(
     """
     [Real-Observable Observation] Case/housing-temperature stress proxy.
 
-    Priority:
-    1) explicit case/housing temperature tensor, if present
-    2) coil temperature with fixed offset proxy (coil - delta)
+    Contract:
+    1) explicit case/housing temperature proxy tensor
+    2) optional coil-offset fallback only when env cfg explicitly allows it
     """
     if not hasattr(env, "motor_deg_state"):
         asset: Articulation = env.scene[asset_cfg.name]
@@ -170,26 +168,10 @@ def thermal_stress_realobs(
             num_joints = len(joint_ids)
         return torch.zeros((env.num_envs, num_joints), device=env.device)
 
-    deg_state = env.motor_deg_state
-    temp = None
-    for name in (
-        "motor_case_temp",
-        "case_temp",
-        "motor_temp_case",
-        "housing_temp",
-        "motor_housing_temp",
-    ):
-        if hasattr(deg_state, name):
-            val = getattr(deg_state, name)
-            if isinstance(val, torch.Tensor):
-                temp = val
-                break
-
+    temp, _ = resolve_realobs_case_temperature_tensor(env, coil_to_case_delta_c=coil_to_case_delta_c)
     if temp is None:
-        if not hasattr(deg_state, "coil_temp"):
-            asset: Articulation = env.scene[asset_cfg.name]
-            return torch.zeros((env.num_envs, asset.data.joint_pos.shape[1]), device=env.device)
-        temp = deg_state.coil_temp - float(coil_to_case_delta_c)
+        asset: Articulation = env.scene[asset_cfg.name]
+        return torch.zeros((env.num_envs, asset.data.joint_pos.shape[1]), device=env.device)
 
     joint_ids = getattr(asset_cfg, "joint_ids", slice(None))
     if joint_ids is None:
@@ -211,9 +193,9 @@ def thermal_rate_realobs(
     """
     [Real-Observable Observation] Temperature-rate proxy (dT/dt).
 
-    Priority:
-    1) case/housing derivative channel (if available and use_case_proxy=True)
-    2) coil derivative channel
+    Contract:
+    1) explicit case/housing derivative channel when `use_case_proxy=True`
+    2) optional coil-derivative fallback only when env cfg explicitly allows it
     """
     if not hasattr(env, "motor_deg_state"):
         asset: Articulation = env.scene[asset_cfg.name]
@@ -224,21 +206,14 @@ def thermal_rate_realobs(
             num_joints = len(joint_ids)
         return torch.zeros((env.num_envs, num_joints), device=env.device)
 
-    deg_state = env.motor_deg_state
     rate = None
     if use_case_proxy:
-        for name in ("case_temp_derivative", "motor_case_temp_derivative", "housing_temp_derivative"):
-            if hasattr(deg_state, name):
-                val = getattr(deg_state, name)
-                if isinstance(val, torch.Tensor):
-                    rate = val
-                    break
+        rate, _ = resolve_realobs_case_temperature_rate_tensor(env)
+    elif hasattr(env.motor_deg_state, "temp_derivative"):
+        rate = env.motor_deg_state.temp_derivative
     if rate is None:
-        if hasattr(deg_state, "temp_derivative"):
-            rate = deg_state.temp_derivative
-        else:
-            asset: Articulation = env.scene[asset_cfg.name]
-            return torch.zeros((env.num_envs, asset.data.joint_pos.shape[1]), device=env.device)
+        asset: Articulation = env.scene[asset_cfg.name]
+        return torch.zeros((env.num_envs, asset.data.joint_pos.shape[1]), device=env.device)
 
     joint_ids = getattr(asset_cfg, "joint_ids", slice(None))
     if joint_ids is None:

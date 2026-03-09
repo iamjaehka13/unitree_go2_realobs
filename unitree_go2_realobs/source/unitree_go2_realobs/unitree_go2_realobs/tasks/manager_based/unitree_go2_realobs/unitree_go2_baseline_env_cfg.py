@@ -16,7 +16,6 @@ from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import TerminationTermCfg as TermTerm
 from isaaclab.utils.noise import UniformNoiseCfg
 
 from . import mdp as deg_mdp
@@ -27,8 +26,10 @@ from .unitree_go2_strategic_env_cfg import (
     ActionsCfg,
     EventCfg,
     CommandsCfg,
+    TerminationsCfg as StrategicTerminationsCfg,
 )
 from .unitree_go2_motor_deg_env import UnitreeGo2MotorDegEnv
+from .paper_b_task_contract import validate_paper_b_task_cfg
 
 
 # -------------------------------------------------------------------------
@@ -172,18 +173,13 @@ class BaselineRewardsCfg:
 
 
 # -------------------------------------------------------------------------
-# Baseline Terminations (keep safety terminations)
+# Baseline Terminations
 # -------------------------------------------------------------------------
 @configclass
-class BaselineTerminationsCfg:
-    time_out = TermTerm(func=mdp.time_out, time_out=True)
+class BaselineTerminationsCfg(StrategicTerminationsCfg):
+    """Main-ladder baseline: match the soft-safety termination contract of ObsOnly/RealObs."""
 
-    base_contact = TermTerm(
-        func=mdp.illegal_contact,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base"), "threshold": 1.0},
-    )
-
-    bad_orientation = TermTerm(func=mdp.bad_orientation, params={"limit_angle": 0.8})
+    thermal_failure = None
 
 
 # -------------------------------------------------------------------------
@@ -192,6 +188,11 @@ class BaselineTerminationsCfg:
 @configclass
 class UnitreeGo2BaselineEnvCfg(ManagerBasedRLEnvCfg):
     class_type = UnitreeGo2MotorDegEnv
+    paper_b_family: str = "main_ladder"
+    paper_b_variant: str = "baseline"
+    paper_b_observation_scope: str = "locomotion_only"
+    paper_b_reward_scope: str = "locomotion_only"
+    paper_b_deployable: bool = True
     scene: UnitreeGo2StrategicSceneCfg = UnitreeGo2StrategicSceneCfg(num_envs=4096, env_spacing=2.5)
 
     observations: BaselineObservationsCfg = BaselineObservationsCfg()
@@ -284,7 +285,7 @@ class UnitreeGo2BaselineEnvCfg(ManagerBasedRLEnvCfg):
     battery_voltage_quant_step_v: float = 0.01
     cell_voltage_quant_step_v: float = 0.005
     cell_ocv_bias_range_v: tuple[float, float] = (-0.015, 0.015)
-    cell_ir_range_ohm: tuple[float, float] = (0.0035, 0.0065)
+    cell_ir_range_ohm: tuple[float, float] = (0.0060, 0.0090)
     cell_sensor_bias_range_v: tuple[float, float] = (-0.010, 0.010)
     velocity_cmd_curriculum_enable: bool = True
     velocity_cmd_curriculum_start_iter: int = 160
@@ -334,3 +335,4 @@ class UnitreeGo2BaselineEnvCfg(ManagerBasedRLEnvCfg):
         self.brownout_recover_v = 25.0
         self.commands.risk_factor.minimum = 1.0
         self.commands.risk_factor.maximum = 1.0
+        validate_paper_b_task_cfg(self)

@@ -18,7 +18,7 @@ ROOT="${SCRIPT_DIR}"
 LOG_ROOT="${ROOT}/logs/rsl_rl"
 EVAL_PY="${ROOT}/evaluate.py"
 
-MODE="${1:-all}"  # baseline | obsonly | realobs | strategic | tempdose | all
+MODE="${1:-all}"  # baseline | obsonly | realobs | realobs_hardtherm | strategic | strategic_nogov | strategic_softtherm | tempdose | all
 NUM_ENVS="${NUM_ENVS:-64}"
 NUM_EPISODES="${NUM_EPISODES:-50}"
 HEADLESS="${HEADLESS:-1}"
@@ -29,20 +29,25 @@ CHECKPOINT_BASENAME="${CHECKPOINT_BASENAME:-model_7999.pt}"
 EVAL_STAMP="${EVAL_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 OBS_ABLATION="${OBS_ABLATION:-none}"
 SENSOR_PRESET="${SENSOR_PRESET:-full}"
-GOVERNOR_MODE="${GOVERNOR_MODE:-off}"  # off | on | both
+GOVERNOR_MODE="${GOVERNOR_MODE:-from_env}"  # from_env | off | on | both
 EVAL_FORCED_WALK_LIN_X_MIN="${EVAL_FORCED_WALK_LIN_X_MIN:-}"
 EVAL_FORCED_WALK_LIN_X_MAX="${EVAL_FORCED_WALK_LIN_X_MAX:-}"
 EVAL_FORCED_WALK_ANG_Z_MIN="${EVAL_FORCED_WALK_ANG_Z_MIN:-}"
 EVAL_FORCED_WALK_ANG_Z_MAX="${EVAL_FORCED_WALK_ANG_Z_MAX:-}"
 
-if [[ "$MODE" != "baseline" && "$MODE" != "obsonly" && "$MODE" != "realobs" && "$MODE" != "strategic" && "$MODE" != "tempdose" && "$MODE" != "all" ]]; then
-  echo "[ERROR] MODE must be one of: baseline | obsonly | realobs | strategic | tempdose | all" >&2
+if [[ "$MODE" != "baseline" && "$MODE" != "obsonly" && "$MODE" != "realobs" && "$MODE" != "realobs_hardtherm" && "$MODE" != "strategic" && "$MODE" != "strategic_nogov" && "$MODE" != "strategic_softtherm" && "$MODE" != "tempdose" && "$MODE" != "all" ]]; then
+  echo "[ERROR] MODE must be one of: baseline | obsonly | realobs | realobs_hardtherm | strategic | strategic_nogov | strategic_softtherm | tempdose | all" >&2
   exit 1
 fi
-if [[ "$GOVERNOR_MODE" != "off" && "$GOVERNOR_MODE" != "on" && "$GOVERNOR_MODE" != "both" ]]; then
-  echo "[ERROR] GOVERNOR_MODE must be one of: off | on | both" >&2
+if [[ "$GOVERNOR_MODE" != "from_env" && "$GOVERNOR_MODE" != "off" && "$GOVERNOR_MODE" != "on" && "$GOVERNOR_MODE" != "both" ]]; then
+  echo "[ERROR] GOVERNOR_MODE must be one of: from_env | off | on | both" >&2
   exit 1
 fi
+
+supports_paper_b_obs_ablation() {
+  local task_slug="$1"
+  [[ "$task_slug" == "obsonly" || "$task_slug" == "realobs" || "$task_slug" == "realobs_hardtherm" || "$task_slug" == "tempdose" ]]
+}
 
 find_run_dir() {
   local log_subdir="$1"
@@ -73,6 +78,12 @@ run_one_variant() {
   local run_prefix="$4"
   local run_name_env="$5"
   local governor_state="$6"
+  local task_obs_ablation="none"
+  local governor_tag="$governor_state"
+
+  if supports_paper_b_obs_ablation "$task_slug"; then
+    task_obs_ablation="$OBS_ABLATION"
+  fi
 
   local run_dir
   run_dir="$(find_run_dir "${log_subdir}" "${run_name_env}" "${run_prefix}")"
@@ -83,12 +94,18 @@ run_one_variant() {
 
   local ckpt
   ckpt="$(find_ckpt "${run_dir}")"
-  local out_root="${ROOT}/eval_results/paper_b_core_${EVAL_STAMP}/${task_slug}_gov${governor_state}"
+  local out_root="${ROOT}/eval_results/paper_b_core_${EVAL_STAMP}/${task_slug}_gov${governor_tag}"
   mkdir -p "${out_root}"
 
-  local governor_flag=(--no-critical_governor_enable)
-  if [[ "$governor_state" == "on" ]]; then
+  local governor_flag=()
+  if [[ "$governor_state" == "off" ]]; then
+    governor_flag=(--no-critical_governor_enable)
+  elif [[ "$governor_state" == "on" ]]; then
     governor_flag=(--critical_governor_enable)
+  else
+    governor_tag="cfg"
+    out_root="${ROOT}/eval_results/paper_b_core_${EVAL_STAMP}/${task_slug}_gov${governor_tag}"
+    mkdir -p "${out_root}"
   fi
 
   echo "[INFO] $(date '+%F %T') task=${task} run=$(basename "${run_dir}") ckpt=$(basename "${ckpt}") governor=${governor_state}"
@@ -111,8 +128,8 @@ run_one_variant() {
       --eval_safety_cmd_profile "${EVAL_SAFETY_CMD_PROFILE}"
       --eval_fault_mode single_motor_fixed
       --eval_fault_motor_id "${mid}"
-      --realobs_obs_ablation "${OBS_ABLATION}"
-      --realobs_sensor_preset "${SENSOR_PRESET}"
+      --paper_b_obs_ablation "${task_obs_ablation}"
+      --paper_b_sensor_preset "${SENSOR_PRESET}"
       "${governor_flag[@]}"
     )
 
@@ -156,7 +173,10 @@ run_one() {
 RUN_NAME_BASELINE="${RUN_NAME_BASELINE:-}"
 RUN_NAME_OBSONLY="${RUN_NAME_OBSONLY:-}"
 RUN_NAME_REALOBS="${RUN_NAME_REALOBS:-}"
+RUN_NAME_REALOBS_HARDTHERM="${RUN_NAME_REALOBS_HARDTHERM:-}"
 RUN_NAME_STRATEGIC="${RUN_NAME_STRATEGIC:-}"
+RUN_NAME_STRATEGIC_NOGOV="${RUN_NAME_STRATEGIC_NOGOV:-}"
+RUN_NAME_STRATEGIC_SOFTTHERM="${RUN_NAME_STRATEGIC_SOFTTHERM:-}"
 RUN_NAME_TEMPDOSE="${RUN_NAME_TEMPDOSE:-}"
 LOG_SUBDIR_TEMPDOSE="${LOG_SUBDIR_TEMPDOSE:-unitree_go2_realobs_tempdose}"
 
@@ -169,8 +189,17 @@ fi
 if [[ "$MODE" == "realobs" || "$MODE" == "all" ]]; then
   run_one "Unitree-Go2-RealObs-v1" "realobs" "unitree_go2_realobs" "realobs" "${RUN_NAME_REALOBS}"
 fi
+if [[ "$MODE" == "realobs_hardtherm" || "$MODE" == "all" ]]; then
+  run_one "Unitree-Go2-RealObs-HardTherm-v1" "realobs_hardtherm" "unitree_go2_realobs" "realobs_hardtherm" "${RUN_NAME_REALOBS_HARDTHERM}"
+fi
 if [[ "$MODE" == "strategic" || "$MODE" == "all" ]]; then
   run_one "Unitree-Go2-Strategic-v1" "strategic" "unitree_go2_realobs_strategic" "strategic" "${RUN_NAME_STRATEGIC}"
+fi
+if [[ "$MODE" == "strategic_nogov" || "$MODE" == "all" ]]; then
+  run_one "Unitree-Go2-Strategic-noGov-v1" "strategic_nogov" "unitree_go2_realobs_strategic" "strategic_nogov" "${RUN_NAME_STRATEGIC_NOGOV}"
+fi
+if [[ "$MODE" == "strategic_softtherm" || "$MODE" == "all" ]]; then
+  run_one "Unitree-Go2-Strategic-SoftTherm-v1" "strategic_softtherm" "unitree_go2_realobs_strategic" "strategic_softtherm" "${RUN_NAME_STRATEGIC_SOFTTHERM}"
 fi
 if [[ "$MODE" == "tempdose" || "$MODE" == "all" ]]; then
   run_one "Unitree-Go2-TempDose-v1" "tempdose" "${LOG_SUBDIR_TEMPDOSE}" "tempdose" "${RUN_NAME_TEMPDOSE}"

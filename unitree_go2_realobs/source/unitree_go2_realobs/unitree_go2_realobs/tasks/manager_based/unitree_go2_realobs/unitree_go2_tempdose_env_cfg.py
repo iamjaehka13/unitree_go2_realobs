@@ -57,6 +57,11 @@ class TempDoseObservationsCfg(RealObsObservationsCfg):
 class UnitreeGo2TempDoseEnvCfg(UnitreeGo2RealObsEnvCfg):
     """Side ablation: RealObs with explicit thermal-rate and dose channels."""
 
+    paper_b_family: str = "side_ablation"
+    paper_b_variant: str = "tempdose"
+    paper_b_observation_scope: str = "measurable_plus_thermal"
+    paper_b_reward_scope: str = "measurable_proxy"
+    paper_b_deployable: bool = True
     observations: TempDoseObservationsCfg = TempDoseObservationsCfg()
     # TempDose side task reports coil-hotspot metrics to align with 90C hard-stop semantics.
     temperature_metric_semantics: str = "coil_hotspot"

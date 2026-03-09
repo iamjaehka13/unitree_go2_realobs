@@ -47,6 +47,21 @@ _register_env(
     f"{__name__}.mdp.agents.rsl_rl_strategic_cfg:UnitreeGo2StrategicPPORunnerCfg",
 )
 _register_env(
+    "Unitree-Go2-Strategic-noGov-v1",
+    f"{__name__}.unitree_go2_governor_variants_env_cfg:UnitreeGo2StrategicNoGovEnvCfg",
+    f"{__name__}.mdp.agents.rsl_rl_strategic_cfg:UnitreeGo2StrategicPPORunnerCfg",
+)
+_register_env(
+    "Unitree-Go2-Strategic-SoftTherm-v1",
+    f"{__name__}.unitree_go2_governor_variants_env_cfg:UnitreeGo2StrategicSoftThermEnvCfg",
+    f"{__name__}.mdp.agents.rsl_rl_strategic_cfg:UnitreeGo2StrategicPPORunnerCfg",
+)
+_register_env(
+    "Unitree-Go2-RealObs-HardTherm-v1",
+    f"{__name__}.unitree_go2_governor_variants_env_cfg:UnitreeGo2RealObsHardThermEnvCfg",
+    f"{__name__}.mdp.agents.rsl_rl_realobs_cfg:UnitreeGo2RealObsPPORunnerCfg",
+)
+_register_env(
     "Unitree-Go2-TempDose-v1",
     f"{__name__}.unitree_go2_tempdose_env_cfg:UnitreeGo2TempDoseEnvCfg",
     f"{__name__}.mdp.agents.rsl_rl_realobs_cfg:UnitreeGo2RealObsPPORunnerCfg",

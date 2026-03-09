@@ -44,18 +44,22 @@ parser.add_argument(
     help="Override critical command governor enable state for Paper B runs.",
 )
 parser.add_argument(
+    "--paper_b_obs_ablation",
     "--realobs_obs_ablation",
+    dest="paper_b_obs_ablation",
     type=str,
     default="none",
     choices=["none", "no_voltage", "no_thermal", "no_vibration"],
-    help="Paper B observation-channel ablation for RealObs-family tasks.",
+    help="Paper B observation-channel ablation.",
 )
 parser.add_argument(
+    "--paper_b_sensor_preset",
     "--realobs_sensor_preset",
+    dest="paper_b_sensor_preset",
     type=str,
     default="full",
     choices=["full", "ideal", "voltage_only", "encoder_transport"],
-    help="Paper B sensor-realism preset for RealObs-family tasks.",
+    help="Paper B sensor-realism preset.",
 )
 parser.add_argument(
     "--train_fault_mode",
@@ -1203,8 +1207,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     paper_b_runtime_cfg = apply_paper_b_runtime_overrides(
         env_cfg,
         critical_governor_enable=args_cli.critical_governor_enable,
-        realobs_obs_ablation=args_cli.realobs_obs_ablation,
-        realobs_sensor_preset=args_cli.realobs_sensor_preset,
+        paper_b_obs_ablation=args_cli.paper_b_obs_ablation,
+        paper_b_sensor_preset=args_cli.paper_b_sensor_preset,
     )
     logger.info("[Train] Paper B runtime overrides=%s", paper_b_runtime_cfg)
     # check for invalid combination of CPU device with distributed training

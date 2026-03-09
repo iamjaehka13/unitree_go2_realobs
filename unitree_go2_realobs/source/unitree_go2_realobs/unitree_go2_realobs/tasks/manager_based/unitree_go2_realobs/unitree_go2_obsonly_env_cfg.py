@@ -14,6 +14,9 @@ from .unitree_go2_realobs_env_cfg import (
 class UnitreeGo2ObsOnlyEnvCfg(UnitreeGo2RealObsEnvCfg):
     """Measurable-only observations with baseline locomotion rewards."""
 
+    paper_b_variant: str = "obsonly"
+    paper_b_observation_scope: str = "measurable_only"
+    paper_b_reward_scope: str = "locomotion_only"
     observations: RealObsObservationsCfg = RealObsObservationsCfg()
     rewards: BaselineRewardsCfg = BaselineRewardsCfg()
     terminations: RealObsTerminationsCfg = RealObsTerminationsCfg()

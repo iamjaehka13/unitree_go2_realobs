@@ -165,6 +165,31 @@ python3 unitree_go2_realobs/scripts/real/log_to_replay_csv.py \
   --output_csv <replay_50hz.csv>
 ```
 
+3) Convert rosbag2 `LowState` logs directly to raw/replay CSV:
+
+```bash
+python3 -m pip install --user rosbags
+
+python3 unitree_go2_realobs/scripts/real/rosbag_lowstate_to_csv.py \
+  --input_bag ./realdata/<bag_dir> \
+  --output_replay_csv ./realdata/<bag_name>_50hz.csv \
+  --cmd_vx 0.0 --cmd_vy 0.0 --cmd_wz 0.0
+```
+
+If the rosbag is nested one level deeper, the script resolves the inner directory
+that contains `metadata.yaml`. It reads `/lowstate` by default. Use
+`--output_raw_csv` as well if you need the full replay-friendly raw CSV.
+
+When directory names already encode the command, e.g. `cmd_x1,y0,z-1data`, you
+can use:
+
+```bash
+python3 unitree_go2_realobs/scripts/real/rosbag_lowstate_to_csv.py \
+  --input_bag ./realdata/cmd_x1,y0,z-1data \
+  --output_replay_csv ./realdata/cmd_x1y0z-1_50hz.csv \
+  --infer_command_from_path
+```
+
 3) Offline governor evaluation from converted log:
 
 ```bash

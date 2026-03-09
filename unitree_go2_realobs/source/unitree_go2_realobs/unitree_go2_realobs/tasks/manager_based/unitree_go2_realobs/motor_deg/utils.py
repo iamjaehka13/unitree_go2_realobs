@@ -24,6 +24,9 @@ try:
         GRAVITY_VAL,
         # Thermal Parameters
         T_AMB,
+        # Battery Parameters
+        BATTERY_OCV_BASE_V, BATTERY_OCV_SOC_SLOPE_V,
+        BATTERY_INTERNAL_RESISTANCE, BATTERY_MAX_SAG_RATIO,
         # Regen Defaults
         REGEN_PEAK_EFFICIENCY, REGEN_OPTIMAL_SPEED, REGEN_WIDTH
     )
@@ -35,6 +38,8 @@ except ImportError:
     K_HYST = 0.01; K_EDDY = 0.0001; B_VISCOUS = 0.001
     GRAVITY_VAL = 9.81
     T_AMB = 25.0
+    BATTERY_OCV_BASE_V = 26.8; BATTERY_OCV_SOC_SLOPE_V = 4.1
+    BATTERY_INTERNAL_RESISTANCE = 0.06; BATTERY_MAX_SAG_RATIO = 0.40
     REGEN_PEAK_EFFICIENCY = 0.60; REGEN_OPTIMAL_SPEED = 12.0; REGEN_WIDTH = 10.0
 
 logger = logging.getLogger("MotorDeg_Core")
@@ -64,14 +69,14 @@ def get_tensor_data(entity: object, attr_path: str, env_ids: torch.Tensor) -> to
 def compute_battery_voltage(
     soc: torch.Tensor,
     load_watts: torch.Tensor,
-    internal_resistance: float = 0.15,
-    max_sag_ratio: float = 0.40
+    internal_resistance: float = BATTERY_INTERNAL_RESISTANCE,
+    max_sag_ratio: float = BATTERY_MAX_SAG_RATIO
 ) -> torch.Tensor:
     """
     [Physics] SOC와 부하를 고려한 배터리 단자 전압 계산 (Soft BMS 적용).
     """
     soc_clamped = torch.clamp(soc, 0.0, 1.0)
-    v_open = 24.0 + (9.6 * soc_clamped) # 8S Li-ion Scale
+    v_open = BATTERY_OCV_BASE_V + (BATTERY_OCV_SOC_SLOPE_V * soc_clamped)
     
     current_est = load_watts / (v_open + EPS)
     # Keep electrical model consistent with training assumption:

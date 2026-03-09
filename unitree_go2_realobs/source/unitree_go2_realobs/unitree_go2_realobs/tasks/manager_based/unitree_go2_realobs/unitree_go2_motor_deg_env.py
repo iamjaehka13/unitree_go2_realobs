@@ -28,6 +28,7 @@ from .motor_deg.interface import (
     clear_motor_deg_step_metrics,
 )
 from .motor_deg.sat_latch import SatLatchCfg, SatRatioLatch
+from .mdp.realobs_contract import resolve_realobs_case_temperature_tensor, resolve_realobs_voltage_tensor
 
 # [Motor-degradation constants]
 from .motor_deg.constants import (
@@ -105,6 +106,8 @@ class UnitreeGo2MotorDegEnv(ManagerBasedRLEnv):
         self._robot_to_motor_deg_local = {
             int(robot_idx): i for i, robot_idx in enumerate(self._motor_deg_joint_index_tensor.tolist())
         }
+
+        self._audit_realobs_observation_contract()
 
         # ---------------------------------------------------------------------
         # [Lifecycle Phase 3] Actuator Binding & Nominal Physics Backup
@@ -2188,6 +2191,31 @@ class UnitreeGo2MotorDegEnv(ManagerBasedRLEnv):
                     return val if env_ids is None else val[env_ids]
         return None
 
+    def _audit_realobs_observation_contract(self) -> None:
+        """Fail fast when a RealObs-style task silently depends on hidden fallbacks."""
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return
+
+        require_voltage_sensor = bool(getattr(cfg, "realobs_require_voltage_sensor", False))
+        require_case_proxy = bool(getattr(cfg, "realobs_require_case_temperature_proxy", False))
+        if not (require_voltage_sensor or require_case_proxy):
+            return
+
+        _, voltage_source = resolve_realobs_voltage_tensor(
+            self,
+            allow_true_voltage_fallback=bool(getattr(cfg, "realobs_allow_true_voltage_fallback", False)),
+            require_voltage_sensor=require_voltage_sensor,
+        )
+        _, case_source = resolve_realobs_case_temperature_tensor(
+            self,
+            allow_coil_fallback=bool(getattr(cfg, "realobs_allow_case_temperature_from_coil_fallback", False)),
+            require_case_proxy=require_case_proxy,
+        )
+
+        self._realobs_voltage_source = str(voltage_source)
+        self._realobs_case_temperature_source = str(case_source)
+
     def _temperature_tensor_for_metrics(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         """
         Return task-consistent temperature tensor for logging/evaluation metrics.
@@ -2199,10 +2227,14 @@ class UnitreeGo2MotorDegEnv(ManagerBasedRLEnv):
 
         coil_temp = self.motor_deg_state.coil_temp if env_ids is None else self.motor_deg_state.coil_temp[env_ids]
         if semantics == "case_proxy":
-            case_like = self._case_temperature_tensor(env_ids=env_ids)
+            case_like, _ = resolve_realobs_case_temperature_tensor(
+                self,
+                env_ids=env_ids,
+                coil_to_case_delta_c=coil_to_case_delta_c,
+            )
             if case_like is not None:
                 return case_like
-            return coil_temp - float(coil_to_case_delta_c)
+            return coil_temp
         return coil_temp
 
     def _cache_terminal_snapshot(self, env_ids: torch.Tensor):
@@ -2332,6 +2364,21 @@ class UnitreeGo2MotorDegEnv(ManagerBasedRLEnv):
         self.extras["motor_deg/avg_temp"] = torch.mean(temps)
         if hasattr(self.motor_deg_state, "motor_case_temp"):
             self.extras["motor_deg/avg_case_temp"] = torch.mean(self.motor_deg_state.motor_case_temp)
+        if hasattr(self, "_realobs_voltage_source"):
+            voltage_source = str(self._realobs_voltage_source)
+            val = torch.tensor(1.0 if voltage_source == "battery_voltage" else 0.0, device=self.device)
+            self.extras["realobs/voltage_source_is_sensor"] = val
+            log_dict["realobs/voltage_source_is_sensor"] = val
+        if hasattr(self, "_realobs_case_temperature_source"):
+            case_source = str(self._realobs_case_temperature_source)
+            explicit_proxy = 0.0 if "fallback" in case_source or case_source == "missing_case_proxy" else 1.0
+            fallback_used = 1.0 if "fallback" in case_source else 0.0
+            val_explicit = torch.tensor(explicit_proxy, device=self.device)
+            val_fallback = torch.tensor(fallback_used, device=self.device)
+            self.extras["realobs/case_source_is_explicit_proxy"] = val_explicit
+            self.extras["realobs/case_source_used_fallback"] = val_fallback
+            log_dict["realobs/case_source_is_explicit_proxy"] = val_explicit
+            log_dict["realobs/case_source_used_fallback"] = val_fallback
         self.extras["motor_deg/max_fatigue"] = torch.max(self.motor_deg_state.fatigue_index)
         self.extras["motor_deg/saturation_rate"] = torch.mean(self.motor_deg_state.torque_saturation)
         if hasattr(self.motor_deg_state, "fault_mask"):

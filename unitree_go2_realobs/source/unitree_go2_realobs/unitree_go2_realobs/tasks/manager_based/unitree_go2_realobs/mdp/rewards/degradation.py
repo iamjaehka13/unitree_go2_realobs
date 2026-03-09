@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.assets import Articulation
 
+from ..realobs_contract import resolve_realobs_case_temperature_tensor
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -134,25 +136,9 @@ def thermal_margin_reward_realobs(
     if not hasattr(env, "motor_deg_state"):
         return torch.zeros(env.num_envs, device=env.device)
 
-    deg_state = env.motor_deg_state
-    temps = None
-    for name in (
-        "motor_case_temp",
-        "case_temp",
-        "motor_temp_case",
-        "housing_temp",
-        "motor_housing_temp",
-    ):
-        if hasattr(deg_state, name):
-            v = getattr(deg_state, name)
-            if isinstance(v, torch.Tensor):
-                temps = v
-                break
-
+    temps, _ = resolve_realobs_case_temperature_tensor(env, coil_to_case_delta_c=coil_to_case_delta_c)
     if temps is None:
-        if not hasattr(deg_state, "coil_temp"):
-            return torch.zeros(env.num_envs, device=env.device)
-        temps = deg_state.coil_temp - float(coil_to_case_delta_c)
+        return torch.zeros(env.num_envs, device=env.device)
 
     joint_ids = getattr(asset_cfg, "joint_ids", slice(None))
     if joint_ids is None:

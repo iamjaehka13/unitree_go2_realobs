@@ -53,6 +53,14 @@ B_VISCOUS = 0.001          # 베어링 점성 마찰 계수 (Nominal)
 BATTERY_CAPACITY_WH = 150.0              # [Wh] 배터리 총 용량
 BATTERY_CAPACITY_J = BATTERY_CAPACITY_WH * 3600.0  # [J] 배터리 총 용량 (줄 단위)
 
+# Real-log first-pass calibration from 2026-03 stand + cmd(x=1,y=0,z=-1) bags.
+# These are operating-range fits for the current Go2 logs, not full electrochemistry identification.
+BATTERY_OCV_BASE_V = 26.8                # [V] pack OCV intercept over observed SOC range
+BATTERY_OCV_SOC_SLOPE_V = 4.1            # [V] pack OCV slope for soc in [0, 1]
+BATTERY_INTERNAL_RESISTANCE = 0.06       # [Ohm] pack-equivalent internal resistance
+BATTERY_MAX_SAG_RATIO = 0.40             # [-] keep generous clip; fit is carried mainly by R
+CELL_INTERNAL_RESISTANCE_NOMINAL = 0.0075  # [Ohm] per-cell nominal IR (~0.06 / 8)
+
 # utils.py 참조 [6]
 REGEN_PEAK_EFFICIENCY = 0.60  # [-] 최대 회생 효율 (60%)
 REGEN_OPTIMAL_SPEED = 12.0    # [rad/s] 최적 속도

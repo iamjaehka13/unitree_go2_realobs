@@ -2,15 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from unitree_go2_realobs.tasks.manager_based.unitree_go2_realobs.paper_b_task_contract import (
+    validate_paper_b_task_cfg,
+)
 
-_REALOBS_OBS_ABLATIONS: dict[str, tuple[str, ...]] = {
+
+_PAPER_B_OBS_ABLATIONS: dict[str, tuple[str, ...]] = {
     "none": (),
     "no_voltage": ("energy_budget",),
-    "no_thermal": ("thermal_stress",),
+    "no_thermal": ("thermal_stress", "thermal_rate", "thermal_dose"),
     "no_vibration": ("vibration_level",),
 }
 
-_REALOBS_SENSOR_PRESETS = ("full", "ideal", "voltage_only", "encoder_transport")
+_PAPER_B_SENSOR_PRESETS = ("full", "ideal", "voltage_only", "encoder_transport")
 
 
 def _set_if_present(obj: object, name: str, value: Any) -> None:
@@ -58,22 +62,22 @@ def apply_paper_b_runtime_overrides(
     env_cfg: object,
     *,
     critical_governor_enable: bool | None = None,
-    realobs_obs_ablation: str = "none",
-    realobs_sensor_preset: str = "full",
+    paper_b_obs_ablation: str = "none",
+    paper_b_sensor_preset: str = "full",
 ) -> dict[str, Any]:
     """Apply Paper-B-specific runtime overrides to a parsed env cfg."""
-    obs_ablation = str(realobs_obs_ablation).strip().lower()
-    sensor_preset = str(realobs_sensor_preset).strip().lower()
+    obs_ablation = str(paper_b_obs_ablation).strip().lower()
+    sensor_preset = str(paper_b_sensor_preset).strip().lower()
 
-    if obs_ablation not in _REALOBS_OBS_ABLATIONS:
+    if obs_ablation not in _PAPER_B_OBS_ABLATIONS:
         raise ValueError(
-            f"Invalid --realobs_obs_ablation={realobs_obs_ablation!r} "
-            f"(expected one of {tuple(_REALOBS_OBS_ABLATIONS.keys())})."
+            f"Invalid --paper_b_obs_ablation={paper_b_obs_ablation!r} "
+            f"(expected one of {tuple(_PAPER_B_OBS_ABLATIONS.keys())})."
         )
-    if sensor_preset not in _REALOBS_SENSOR_PRESETS:
+    if sensor_preset not in _PAPER_B_SENSOR_PRESETS:
         raise ValueError(
-            f"Invalid --realobs_sensor_preset={realobs_sensor_preset!r} "
-            f"(expected one of {_REALOBS_SENSOR_PRESETS})."
+            f"Invalid --paper_b_sensor_preset={paper_b_sensor_preset!r} "
+            f"(expected one of {_PAPER_B_SENSOR_PRESETS})."
         )
 
     if critical_governor_enable is not None and hasattr(env_cfg, "critical_governor_enable"):
@@ -81,11 +85,11 @@ def apply_paper_b_runtime_overrides(
 
     if obs_ablation != "none":
         disabled_any = False
-        for term_name in _REALOBS_OBS_ABLATIONS[obs_ablation]:
+        for term_name in _PAPER_B_OBS_ABLATIONS[obs_ablation]:
             disabled_any = _disable_obs_term(env_cfg, term_name) or disabled_any
         if not disabled_any:
             raise ValueError(
-                f"Observation ablation '{obs_ablation}' requested, but matching RealObs observation terms "
+                f"Observation ablation '{obs_ablation}' requested, but matching Paper-B observation terms "
                 "were not found in the active task cfg."
             )
 
@@ -138,9 +142,11 @@ def apply_paper_b_runtime_overrides(
 
     setattr(env_cfg, "paper_b_obs_ablation", obs_ablation)
     setattr(env_cfg, "paper_b_sensor_preset", sensor_preset)
+    paper_b_contract_summary = validate_paper_b_task_cfg(env_cfg)
 
     return {
         "paper_b_obs_ablation": obs_ablation,
         "paper_b_sensor_preset": sensor_preset,
         "critical_governor_enable": getattr(env_cfg, "critical_governor_enable", None),
+        "paper_b_contract_summary": paper_b_contract_summary,
     }

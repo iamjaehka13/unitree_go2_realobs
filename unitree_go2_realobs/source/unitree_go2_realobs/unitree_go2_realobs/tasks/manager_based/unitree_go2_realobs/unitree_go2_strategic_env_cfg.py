@@ -34,6 +34,7 @@ from isaaclab.utils.noise import GaussianNoiseCfg, UniformNoiseCfg
 from .unitree_go2_motor_deg_env import UnitreeGo2MotorDegEnv
 from .mdp.commands import UniformScalarCommandCfg, UniformScalarCommand
 from . import mdp as deg_mdp
+from .paper_b_task_contract import validate_paper_b_task_cfg
 
 # -------------------------------------------------------------------------
 # A. Scene Configuration
@@ -516,6 +517,11 @@ class TerminationsCfg:
 @configclass
 class UnitreeGo2StrategicEnvCfg(ManagerBasedRLEnvCfg):
     class_type = UnitreeGo2MotorDegEnv 
+    paper_b_family: str = "upper_bound"
+    paper_b_variant: str = "strategic"
+    paper_b_observation_scope: str = "privileged"
+    paper_b_reward_scope: str = "privileged"
+    paper_b_deployable: bool = False
     scene: UnitreeGo2StrategicSceneCfg = UnitreeGo2StrategicSceneCfg(num_envs=4096, env_spacing=2.5)
     # Keep heavy contact debug monitor off by default for scalable training.
     debug_contact_force_monitor: bool = False
@@ -529,6 +535,7 @@ class UnitreeGo2StrategicEnvCfg(ManagerBasedRLEnvCfg):
     brownout_voltage_source: str = "bms_pred"
     brownout_enter_v: float = 24.5
     brownout_recover_v: float = 25.0
+    temperature_metric_semantics: str = "coil_hotspot"
     # Sensor-bias randomization for battery voltage channel (reset-time DR).
     # Default range is conservative; tune with real logs if available.
     voltage_sensor_bias_range_v: tuple[float, float] = (-0.12, 0.12)
@@ -552,7 +559,7 @@ class UnitreeGo2StrategicEnvCfg(ManagerBasedRLEnvCfg):
     cell_voltage_quant_step_v: float = 0.005
     # 8-cell DR priors (used when synthesizing per-cell voltage channel).
     cell_ocv_bias_range_v: tuple[float, float] = (-0.015, 0.015)
-    cell_ir_range_ohm: tuple[float, float] = (0.0035, 0.0065)
+    cell_ir_range_ohm: tuple[float, float] = (0.0060, 0.0090)
     cell_sensor_bias_range_v: tuple[float, float] = (-0.010, 0.010)
     # Curriculum schedule length in environment steps (used by MotorDeg reset curriculum).
     curriculum_total_steps: int = 120_000
@@ -701,3 +708,4 @@ class UnitreeGo2StrategicEnvCfg(ManagerBasedRLEnvCfg):
             self.scene.contact_forces.update_period = self.sim.dt
         if self.scene.height_scanner is not None:
             self.scene.height_scanner.update_period = self.decimation * self.sim.dt
+        validate_paper_b_task_cfg(self)
