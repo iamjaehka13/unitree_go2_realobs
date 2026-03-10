@@ -1,7 +1,11 @@
 # Paper B 실행 및 실로봇 가이드 (KR)
 
 작성일: 2026-03-09  
-논문 제목: `Real-Observable Safety Locomotion under Motor Degradation`
+논문 제목 후보:
+- `Real-Observable Reinforcement Learning for Robust Locomotion under Motor Degradation`
+- `Real-Observable Reinforcement Learning for Safe Locomotion under Motor Degradation`
+
+현재는 위 두 후보 중 하나를 최종 선택하기 전 단계로 둔다.
 
 이 문서는 현재 코드베이스의 active execution guide다. 목적은 Paper B 기준의 학습, 평가, 실로봇 로그 수집, governor 검증 절차를 하나의 문서로 고정하는 것이다.
 

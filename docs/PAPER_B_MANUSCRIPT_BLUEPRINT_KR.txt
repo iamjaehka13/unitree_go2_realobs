@@ -3,7 +3,10 @@ Paper B 원고 청사진 (2026-03-09)
 
 제목
 ----
-Real-Observable Safety Locomotion under Motor Degradation
+후보 1. Real-Observable Reinforcement Learning for Robust Locomotion under Motor Degradation
+후보 2. Real-Observable Reinforcement Learning for Safe Locomotion under Motor Degradation
+
+현재는 위 두 제목 후보 중 하나를 최종 선택하기 전 단계로 둔다.
 
 
 0) 이 문서의 목적
