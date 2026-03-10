@@ -9,22 +9,7 @@ import statistics
 from pathlib import Path
 from typing import Any
 
-PAPER_SCENARIO_LABELS = {
-    "fresh": "nominal",
-    "used": "moderate",
-    "aged": "severe",
-    "critical": "critical",
-}
-SCENARIO_CLI_ALIASES = {
-    "fresh": "fresh",
-    "used": "used",
-    "aged": "aged",
-    "critical": "critical",
-    "nominal": "fresh",
-    "moderate": "used",
-    "severe": "aged",
-    "safety_critical": "critical",
-}
+from scenario_labels import scenario_key as _scenario_key, scenario_label as _scenario_label
 
 
 MIRROR_PAIRS = ((0, 3), (1, 4), (2, 5), (6, 9), (7, 10), (8, 11))
@@ -92,18 +77,6 @@ def _metric_mean(eval_result: dict[str, Any], scenario: str, metric: str) -> flo
     if isinstance(v, (int, float)):
         return float(v)
     return float("nan")
-
-
-def _scenario_key(name: str) -> str:
-    key = SCENARIO_CLI_ALIASES.get(str(name).strip().lower())
-    if key is None:
-        valid = ", ".join(sorted(SCENARIO_CLI_ALIASES.keys()))
-        raise ValueError(f"Unknown scenario name '{name}'. Expected one of: {valid}")
-    return key
-
-
-def _scenario_label(name: str) -> str:
-    return PAPER_SCENARIO_LABELS.get(_scenario_key(name), str(name).strip().lower())
 
 
 def _percentile(values: list[float], q: float) -> float:

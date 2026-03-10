@@ -35,23 +35,13 @@ for _path in (str(_SOURCE_ROOT), str(_ISAACLAB_TASKS_ROOT)):
 
 from isaaclab.app import AppLauncher
 
-PAPER_SCENARIO_LABELS = {
-    "fresh": "nominal",
-    "used": "moderate",
-    "aged": "severe",
-    "critical": "critical",
-}
-SCENARIO_CLI_ALIASES = {
-    "fresh": "fresh",
-    "used": "used",
-    "aged": "aged",
-    "critical": "critical",
-    "nominal": "fresh",
-    "moderate": "used",
-    "severe": "aged",
-    "safety_critical": "critical",
-}
-SCENARIO_CLI_CHOICES = sorted(set(["fresh", "used", "aged", "critical", "nominal", "moderate", "severe", "safety_critical"]))
+from scenario_labels import (
+    PAPER_SCENARIO_LABELS,
+    SCENARIO_CLI_CHOICES,
+    scenario_key as _scenario_key,
+    scenario_label as _scenario_label,
+    scenario_labels as _scenario_labels,
+)
 
 parser = argparse.ArgumentParser(description="Evaluate trained policy under degradation scenarios.")
 parser.add_argument("--task", type=str, required=True, help="Gym task ID")
@@ -459,22 +449,6 @@ SCENARIOS = {
         "soc_range": (0.1, 0.3),
     },
 }
-
-
-def _scenario_key(name: str) -> str:
-    key = SCENARIO_CLI_ALIASES.get(str(name).strip().lower())
-    if key is None:
-        valid = ", ".join(sorted(SCENARIO_CLI_ALIASES.keys()))
-        raise ValueError(f"Unknown scenario name '{name}'. Expected one of: {valid}")
-    return key
-
-
-def _scenario_label(name: str) -> str:
-    return PAPER_SCENARIO_LABELS.get(_scenario_key(name), str(name).strip().lower())
-
-
-def _scenario_labels(names: list[str]) -> list[str]:
-    return [_scenario_label(name) for name in names]
 
 
 @dataclass

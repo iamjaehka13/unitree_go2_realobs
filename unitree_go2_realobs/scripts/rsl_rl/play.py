@@ -15,32 +15,18 @@ import sys
 
 from isaaclab.app import AppLauncher
 
-PAPER_SCENARIO_LABELS = {
-    "fresh": "nominal",
-    "used": "moderate",
-    "aged": "severe",
-    "critical": "critical",
-}
-SCENARIO_CLI_ALIASES = {
-    "none": "none",
-    "fresh": "fresh",
-    "used": "used",
-    "aged": "aged",
-    "critical": "critical",
-    "nominal": "fresh",
-    "moderate": "used",
-    "severe": "aged",
-    "safety_critical": "critical",
-}
-SCENARIO_CLI_CHOICES = sorted(set(SCENARIO_CLI_ALIASES.keys()))
+from scenario_labels import (
+    PAPER_SCENARIO_LABELS,
+    SCENARIO_CLI_CHOICES_WITH_NONE,
+    scenario_key as _scenario_key_base,
+)
 
 
 def _scenario_key(name: str) -> str:
-    key = SCENARIO_CLI_ALIASES.get(str(name).strip().lower())
-    if key is None:
-        valid = ", ".join(sorted(SCENARIO_CLI_ALIASES.keys()))
-        raise ValueError(f"Unknown scenario name '{name}'. Expected one of: {valid}")
-    return key
+    raw = str(name).strip().lower()
+    if raw == "none":
+        return "none"
+    return _scenario_key_base(raw)
 
 # local imports
 import cli_args  # isort: skip
@@ -91,7 +77,7 @@ parser.add_argument(
     "--force_fault_scenario",
     type=str,
     default="none",
-    choices=SCENARIO_CLI_CHOICES,
+    choices=SCENARIO_CLI_CHOICES_WITH_NONE,
     help="Force MotorDeg reset scenario during play for visualization/debug (paper labels or legacy keys).",
 )
 parser.add_argument(

@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from scenario_labels import scenario_label
+
 
 METRIC_SPECS: dict[str, dict[str, str]] = {
     # Legacy tail metrics
@@ -193,6 +195,8 @@ def main() -> None:
 
         row: dict[str, Any] = {
             "label": label,
+            "scenario": scenario_label("critical"),
+            "scenario_key": "critical",
             "ts": _extract_ts(eval_path),
             "run_dir": eval_path.parent.name,
             "file": eval_path.name,
