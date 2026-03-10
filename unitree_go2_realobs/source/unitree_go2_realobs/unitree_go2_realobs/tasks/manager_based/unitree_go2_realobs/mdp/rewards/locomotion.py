@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, List
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster
 from isaaclab.assets import Articulation
+import isaaclab.utils.math as math_utils
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -20,6 +21,7 @@ __all__ = [
     "track_lin_vel_xy_exp",
     "track_ang_vel_z_exp",
     "feet_air_time",
+    "foot_clearance",
     "feet_slide",
     "feet_air_time_aggregated",
     "feet_slide_aggregated",
@@ -58,21 +60,84 @@ def feet_air_time(
     threshold: float,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_foot"),
 ) -> torch.Tensor:
-    """[Gait] 체공 시간 보상 (단일 ContactSensor, body_names 필터링)."""
+    """[Gait] Touchdown moment에만 지급되는 체공 시간 보상."""
     sensor: ContactSensor = env.scene[sensor_cfg.name]
     if sensor_cfg.body_ids is None:
         sensor_cfg.resolve(env.scene)
 
-    contact_force = torch.norm(sensor.data.net_forces_w[:, sensor_cfg.body_ids, :], dim=-1)
-    in_contact = contact_force > threshold  # (num_envs, num_feet)
-
+    # Match Isaac Lab semantics:
+    # - sensor.force_threshold decides contact state / last_air_time updates
+    # - reward threshold is the minimum target air-time, not a force threshold
+    first_contact = sensor.compute_first_contact(env.step_dt)[:, sensor_cfg.body_ids]
     air_time = sensor.data.last_air_time[:, sensor_cfg.body_ids]
-    reward_per_foot = air_time * in_contact.float()
-    total_reward = torch.sum(reward_per_foot, dim=1)
+    total_reward = torch.sum((air_time - threshold) * first_contact, dim=1)
 
     cmd = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
     is_moving = (cmd > 0.1).float()
     return total_reward * is_moving
+
+
+def _nearest_height_scanner_hits(
+    sensor: RayCaster,
+    foot_pos_w: torch.Tensor,
+) -> torch.Tensor:
+    """Map each foot to the nearest height-scanner ray and return its terrain hit z."""
+    sensor_pos_w = sensor.data.pos_w.unsqueeze(1)
+    sensor_quat_yaw = math_utils.yaw_quat(sensor.data.quat_w).unsqueeze(1).expand(-1, foot_pos_w.shape[1], -1)
+    foot_pos_yaw = math_utils.quat_apply_inverse(sensor_quat_yaw, foot_pos_w - sensor_pos_w)
+
+    ray_xy = sensor.ray_starts[:, :, :2]
+    foot_xy = foot_pos_yaw[:, :, :2]
+    dist_sq = torch.sum(torch.square(foot_xy.unsqueeze(2) - ray_xy.unsqueeze(1)), dim=-1)
+    nearest_ray_ids = torch.argmin(dist_sq, dim=-1)
+
+    ray_hits_z = sensor.data.ray_hits_w[:, :, 2]
+    terrain_z = torch.gather(ray_hits_z, 1, nearest_ray_ids)
+
+    valid_hits = torch.isfinite(ray_hits_z) & (ray_hits_z > -100.0)
+    fallback_terrain_z = torch.sum(ray_hits_z * valid_hits.float(), dim=1) / valid_hits.float().sum(dim=1).clamp_min(1.0)
+    terrain_z = torch.where(torch.isfinite(terrain_z), terrain_z, fallback_terrain_z.unsqueeze(1))
+    return terrain_z
+
+
+def foot_clearance(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    target_height: float,
+    std: float,
+    tanh_mult: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*_foot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*_foot"),
+    height_sensor_cfg: SceneEntityCfg = SceneEntityCfg("height_scanner"),
+) -> torch.Tensor:
+    """Reward swing feet for maintaining a terrain-relative clearance target."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
+    height_sensor: RayCaster = env.scene[height_sensor_cfg.name]
+
+    if asset_cfg.body_ids is None:
+        asset_cfg.resolve(env.scene)
+    if sensor_cfg.body_ids is None:
+        sensor_cfg.resolve(env.scene)
+
+    foot_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids, :]
+    terrain_z = _nearest_height_scanner_hits(height_sensor, foot_pos_w)
+    foot_clearance_m = foot_pos_w[:, :, 2] - terrain_z
+
+    contact_force = torch.norm(contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :], dim=-1)
+    swing_mask = (contact_force < float(contact_sensor.cfg.force_threshold)).float()
+    foot_speed_xy = torch.norm(asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2], dim=-1)
+    speed_gate = torch.tanh(tanh_mult * foot_speed_xy)
+    active_gate = swing_mask * speed_gate
+
+    clearance_error = torch.square(foot_clearance_m - target_height)
+    mean_error = torch.sum(clearance_error * active_gate, dim=1) / active_gate.sum(dim=1).clamp_min(1.0)
+    reward = torch.exp(-mean_error / (std**2))
+    reward = torch.where(active_gate.sum(dim=1) > 0.0, reward, torch.zeros_like(reward))
+
+    cmd = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+    is_moving = (cmd > 0.1).float()
+    return reward * is_moving
 
 
 def feet_slide(
@@ -104,8 +169,9 @@ def feet_air_time_aggregated(
     sensor_names: List[str]
 ) -> torch.Tensor:
     """
-    [Gait] 체공 시간 보상.
-    last_air_time이 net_forces_w 기반이므로, 접촉 판단도 net_forces_w를 사용합니다.
+    [Gait] Aggregated touchdown-only air-time reward.
+
+    `threshold` is the minimum target air-time, following Isaac Lab semantics.
     """
     total_reward = torch.zeros(env.num_envs, device=env.device)
     cmd = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
@@ -113,14 +179,10 @@ def feet_air_time_aggregated(
 
     for name in sensor_names:
         sensor: ContactSensor = env.scene[name]
-        
-        # net_forces_w 사용 (last_air_time과 동일한 소스)
-        contact_force = torch.norm(sensor.data.net_forces_w[:, 0, :], dim=-1)
-        in_contact = contact_force > threshold
-        
-        # 발이 착지한 순간, 지금까지의 체공시간을 보상으로 지급
+
+        first_contact = sensor.compute_first_contact(env.step_dt)[:, 0]
         air_time = sensor.data.last_air_time[:, 0]
-        total_reward += (air_time * in_contact.float())
+        total_reward += (air_time - threshold) * first_contact
             
     return total_reward * is_moving
 

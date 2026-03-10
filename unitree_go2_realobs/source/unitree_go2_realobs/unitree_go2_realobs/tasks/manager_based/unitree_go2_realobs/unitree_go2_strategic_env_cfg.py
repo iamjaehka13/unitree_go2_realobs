@@ -57,7 +57,17 @@ class UnitreeGo2StrategicSceneCfg(InteractiveSceneCfg):
             slope_threshold=0.75,
             use_cache=False,
             sub_terrains={
-                "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.1),
+                # Shared Paper B default: stay mostly flat, but inject enough floor irregularity
+                # to remove low-clearance reward hacking without turning the task into blind
+                # foothold planning.
+                "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.9),
+                "mild_random_rough": terrain_gen.HfRandomUniformTerrainCfg(
+                    proportion=0.1,
+                    noise_range=(0.0, 0.01),
+                    noise_step=0.005,
+                    downsampled_scale=0.2,
+                    border_width=0.25,
+                ),
             },
         ),
         collision_group=-1,
@@ -402,14 +412,19 @@ class RewardsCfg:
         params={"command_name": "base_velocity", "std": 0.25, "asset_cfg": SceneEntityCfg("robot")}
     )
 
-    # 발 체공 시간 보상(Trotting 유도): reference 계열 기본값으로 활성화.
-    # threshold는 센서 force_threshold(5.0N)와 일치시킵니다.
-    feet_air_time = RewTerm(
-        func=deg_mdp.feet_air_time,
-        weight=0.1,
+    # Shared locomotion scaffold: enforce terrain-relative swing clearance to remove
+    # flat-ground low-clearance reward hacking across all Paper B variants.
+    foot_clearance = RewTerm(
+        func=deg_mdp.foot_clearance,
+        weight=0.03,
         params={
             "command_name": "base_velocity",
-            "threshold": 0.5,
+            "target_height": 0.04,
+            "std": 0.02,
+            "tanh_mult": 2.0,
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+            "height_sensor_cfg": SceneEntityCfg("height_scanner"),
         }
     )
 

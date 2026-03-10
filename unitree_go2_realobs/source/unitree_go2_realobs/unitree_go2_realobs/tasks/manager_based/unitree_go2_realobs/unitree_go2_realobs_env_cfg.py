@@ -153,10 +153,18 @@ class RealObsRewardsCfg:
         weight=0.75,
         params={"command_name": "base_velocity", "std": 0.25, "asset_cfg": SceneEntityCfg("robot")},
     )
-    feet_air_time = RewTerm(
-        func=deg_mdp.feet_air_time,
-        weight=0.1,
-        params={"command_name": "base_velocity", "threshold": 0.5},
+    foot_clearance = RewTerm(
+        func=deg_mdp.foot_clearance,
+        weight=0.03,
+        params={
+            "command_name": "base_velocity",
+            "target_height": 0.04,
+            "std": 0.02,
+            "tanh_mult": 2.0,
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+            "height_sensor_cfg": SceneEntityCfg("height_scanner"),
+        },
     )
 
     feet_slide = RewTerm(

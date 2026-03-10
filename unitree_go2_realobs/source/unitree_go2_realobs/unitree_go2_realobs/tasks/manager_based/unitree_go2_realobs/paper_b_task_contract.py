@@ -35,7 +35,7 @@ _LOCOMOTION_REWARDS = frozenset(
     {
         "track_lin_vel_xy",
         "track_ang_vel_z",
-        "feet_air_time",
+        "foot_clearance",
         "feet_slide",
         "undesired_contacts",
         "lin_vel_z_l2",
