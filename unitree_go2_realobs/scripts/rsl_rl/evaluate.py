@@ -18,10 +18,40 @@ AppLauncher must be initialized before importing Isaac task modules.
 """
 
 import argparse
+import os
 import sys
+from pathlib import Path
+
+_THIS_FILE = Path(__file__).resolve()
+_SCRIPT_DIR = _THIS_FILE.parent
+_REPO_ROOT = _SCRIPT_DIR.parents[2]
+_PACKAGE_ROOT = _REPO_ROOT / "unitree_go2_realobs"
+_SOURCE_ROOT = _PACKAGE_ROOT / "source" / "unitree_go2_realobs"
+_ISAACLAB_ROOT = Path(os.environ.get("ISAACLAB_ROOT", str(Path.home() / "IsaacLab"))).expanduser()
+_ISAACLAB_TASKS_ROOT = _ISAACLAB_ROOT / "source" / "isaaclab_tasks"
+for _path in (str(_SOURCE_ROOT), str(_ISAACLAB_TASKS_ROOT)):
+    if os.path.isdir(_path) and _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from isaaclab.app import AppLauncher
-from paper_b_runtime import apply_paper_b_runtime_overrides
+
+PAPER_SCENARIO_LABELS = {
+    "fresh": "nominal",
+    "used": "moderate",
+    "aged": "severe",
+    "critical": "critical",
+}
+SCENARIO_CLI_ALIASES = {
+    "fresh": "fresh",
+    "used": "used",
+    "aged": "aged",
+    "critical": "critical",
+    "nominal": "fresh",
+    "moderate": "used",
+    "severe": "aged",
+    "safety_critical": "critical",
+}
+SCENARIO_CLI_CHOICES = sorted(set(["fresh", "used", "aged", "critical", "nominal", "moderate", "severe", "safety_critical"]))
 
 parser = argparse.ArgumentParser(description="Evaluate trained policy under degradation scenarios.")
 parser.add_argument("--task", type=str, required=True, help="Gym task ID")
@@ -56,6 +86,17 @@ parser.add_argument(
     default="full",
     choices=["full", "ideal", "voltage_only", "encoder_transport"],
     help="Paper B sensor-realism preset.",
+)
+parser.add_argument(
+    "--eval_terrain_profile",
+    type=str,
+    default="from_env",
+    choices=["from_env", "flat_only", "mild_rough_only"],
+    help=(
+        "Evaluation terrain profile override. "
+        "'from_env' keeps task terrain mix, 'flat_only' forces plane-only patches, "
+        "'mild_rough_only' forces the configured mild-rough patches only."
+    ),
 )
 parser.add_argument(
     "--eval_fault_mode",
@@ -99,8 +140,8 @@ parser.add_argument(
     choices=["combined", "locomotion_only", "safety_only"],
     help=(
         "Evaluation protocol split. "
-        "'combined': fresh/used/aged/critical, "
-        "'locomotion_only': fresh/used/aged, "
+        "'combined': nominal/moderate/severe/critical, "
+        "'locomotion_only': nominal/moderate/severe, "
         "'safety_only': critical."
     ),
 )
@@ -284,8 +325,11 @@ parser.add_argument(
 parser.add_argument(
     "--eval_contact_force_threshold",
     type=float,
-    default=15.0,
-    help="Contact force threshold (N) for gait/contact diagnostics.",
+    default=-1.0,
+    help=(
+        "Contact force threshold (N) for gait/contact diagnostics. "
+        "Set <= 0 to infer from the env contact sensor cfg."
+    ),
 )
 parser.add_argument(
     "--eval_debug_print_body_names",
@@ -312,8 +356,8 @@ parser.add_argument(
     "--eval_dump_timeseries_scenario",
     type=str,
     default="critical",
-    choices=["fresh", "used", "aged", "critical"],
-    help="Scenario name for timeseries dumping.",
+    choices=SCENARIO_CLI_CHOICES,
+    help="Scenario name for timeseries dumping (paper labels or legacy internal keys).",
 )
 parser.add_argument(
     "--eval_dump_timeseries_env_id",
@@ -350,6 +394,7 @@ import os
 import json
 import torch
 import numpy as np
+import isaaclab.utils.math as math_utils
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -363,6 +408,7 @@ from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
+from paper_b_runtime import apply_paper_b_runtime_overrides
 import unitree_go2_realobs.tasks  # noqa: F401
 from unitree_go2_realobs.tasks.manager_based.unitree_go2_realobs.paper_b_task_contract import (
     summarize_paper_b_task_cfg,
@@ -413,6 +459,22 @@ SCENARIOS = {
         "soc_range": (0.1, 0.3),
     },
 }
+
+
+def _scenario_key(name: str) -> str:
+    key = SCENARIO_CLI_ALIASES.get(str(name).strip().lower())
+    if key is None:
+        valid = ", ".join(sorted(SCENARIO_CLI_ALIASES.keys()))
+        raise ValueError(f"Unknown scenario name '{name}'. Expected one of: {valid}")
+    return key
+
+
+def _scenario_label(name: str) -> str:
+    return PAPER_SCENARIO_LABELS.get(_scenario_key(name), str(name).strip().lower())
+
+
+def _scenario_labels(names: list[str]) -> list[str]:
+    return [_scenario_label(name) for name in names]
 
 
 @dataclass
@@ -1125,6 +1187,124 @@ def _get_body_lin_vel_tensor(base_env) -> torch.Tensor | None:
     return None
 
 
+def _get_body_pos_tensor(base_env) -> torch.Tensor | None:
+    robot_data = base_env.scene["robot"].data
+    for key in ("body_pos_w", "link_pos_w"):
+        val = getattr(robot_data, key, None)
+        if isinstance(val, torch.Tensor) and val.ndim >= 3 and val.shape[-1] >= 3:
+            return val
+    body_state = getattr(robot_data, "body_state_w", None)
+    if isinstance(body_state, torch.Tensor) and body_state.ndim >= 3 and body_state.shape[-1] >= 3:
+        return body_state[..., 0:3]
+    return None
+
+
+def _clearance_eval_params(base_env) -> dict[str, float] | None:
+    reward_cfg = getattr(getattr(base_env, "cfg", None), "rewards", None)
+    term_cfg = getattr(reward_cfg, "foot_clearance", None) if reward_cfg is not None else None
+    params = getattr(term_cfg, "params", None) if term_cfg is not None else None
+    if not isinstance(params, dict):
+        return None
+    target_height = float(params.get("target_height", 0.04))
+    std = float(params.get("std", 0.02))
+    return {
+        "target_height": target_height,
+        "hit_tolerance_m": max(0.5 * std, 0.01),
+        "low_threshold_m": max(0.5 * target_height, 0.01),
+        "scuff_threshold_m": max(0.25 * target_height, 0.005),
+        "speed_threshold_mps": 0.10,
+    }
+
+
+def _nearest_height_scanner_hits(height_sensor, foot_pos_w: torch.Tensor) -> torch.Tensor | None:
+    ray_hits_w = getattr(getattr(height_sensor, "data", None), "ray_hits_w", None)
+    sensor_pos_w = getattr(getattr(height_sensor, "data", None), "pos_w", None)
+    sensor_quat_w = getattr(getattr(height_sensor, "data", None), "quat_w", None)
+    ray_starts = getattr(height_sensor, "ray_starts", None)
+    if (
+        not isinstance(ray_hits_w, torch.Tensor)
+        or not isinstance(sensor_pos_w, torch.Tensor)
+        or not isinstance(sensor_quat_w, torch.Tensor)
+        or not isinstance(ray_starts, torch.Tensor)
+    ):
+        return None
+
+    sensor_pos_w = sensor_pos_w.unsqueeze(1)
+    sensor_quat_yaw = math_utils.yaw_quat(sensor_quat_w).unsqueeze(1).expand(-1, foot_pos_w.shape[1], -1)
+    foot_pos_yaw = math_utils.quat_apply_inverse(sensor_quat_yaw, foot_pos_w - sensor_pos_w)
+
+    ray_xy = ray_starts[:, :, :2]
+    foot_xy = foot_pos_yaw[:, :, :2]
+    dist_sq = torch.sum(torch.square(foot_xy.unsqueeze(2) - ray_xy.unsqueeze(1)), dim=-1)
+    nearest_ray_ids = torch.argmin(dist_sq, dim=-1)
+
+    ray_hits_z = ray_hits_w[:, :, 2]
+    terrain_z = torch.gather(ray_hits_z, 1, nearest_ray_ids)
+
+    valid_hits = torch.isfinite(ray_hits_z) & (ray_hits_z > -100.0)
+    fallback_terrain_z = torch.sum(ray_hits_z * valid_hits.float(), dim=1) / valid_hits.float().sum(dim=1).clamp_min(1.0)
+    terrain_z = torch.where(torch.isfinite(terrain_z), terrain_z, fallback_terrain_z.unsqueeze(1))
+    return terrain_z
+
+
+def _resolve_eval_contact_force_threshold(base_env, requested_threshold: float) -> tuple[float, str]:
+    requested_threshold = float(requested_threshold)
+    if requested_threshold > 0.0:
+        return requested_threshold, "cli"
+    try:
+        contact_sensor = base_env.scene["contact_forces"]
+        sensor_threshold = float(getattr(getattr(contact_sensor, "cfg", None), "force_threshold"))
+        if sensor_threshold > 0.0:
+            return sensor_threshold, "sensor_cfg"
+    except Exception:
+        pass
+    return 15.0, "fallback_15n"
+
+
+def _apply_eval_terrain_profile(env_cfg: object, terrain_profile: str) -> dict[str, Any]:
+    profile = str(terrain_profile).strip().lower()
+    result: dict[str, Any] = {"requested": profile, "applied": False, "reason": "from_env"}
+    if profile == "from_env":
+        return result
+
+    scene_cfg = getattr(env_cfg, "scene", None)
+    terrain_cfg = getattr(scene_cfg, "terrain", None) if scene_cfg is not None else None
+    terrain_generator = getattr(terrain_cfg, "terrain_generator", None) if terrain_cfg is not None else None
+    sub_terrains = getattr(terrain_generator, "sub_terrains", None) if terrain_generator is not None else None
+    if not isinstance(sub_terrains, dict):
+        result["reason"] = "terrain_generator_missing"
+        return result
+
+    flat_cfg = sub_terrains.get("flat")
+    mild_cfg = sub_terrains.get("mild_random_rough")
+    if flat_cfg is None or mild_cfg is None:
+        result["reason"] = "expected_subterrains_missing"
+        return result
+
+    if profile == "flat_only":
+        flat_cfg.proportion = 1.0
+        mild_cfg.proportion = 0.0
+    elif profile == "mild_rough_only":
+        flat_cfg.proportion = 0.0
+        mild_cfg.proportion = 1.0
+    else:
+        raise ValueError(
+            f"Invalid --eval_terrain_profile={terrain_profile!r} "
+            "(expected one of ('from_env', 'flat_only', 'mild_rough_only'))."
+        )
+
+    result.update(
+        {
+            "applied": True,
+            "reason": "terrain_generator_subterrain_override",
+            "flat_proportion": float(getattr(flat_cfg, "proportion", float('nan'))),
+            "mild_random_rough_proportion": float(getattr(mild_cfg, "proportion", float('nan'))),
+            "mild_random_rough_noise_range": tuple(getattr(mild_cfg, "noise_range", ())),
+        }
+    )
+    return result
+
+
 def collect_gait_contact_metrics(
     env,
     foot_body_ids: torch.Tensor | None,
@@ -1134,24 +1314,85 @@ def collect_gait_contact_metrics(
     if foot_body_ids is None or int(foot_body_ids.numel()) == 0:
         return {"available": False}
 
-    contact_forces = _get_contact_forces_tensor(base_env)
     body_lin_vel = _get_body_lin_vel_tensor(base_env)
-    if contact_forces is None or body_lin_vel is None:
+    body_pos_w = _get_body_pos_tensor(base_env)
+    if body_lin_vel is None:
         return {"available": False}
 
-    num_bodies = int(contact_forces.shape[1])
-    if int(torch.max(foot_body_ids).item()) >= num_bodies:
+    sensor = None
+    try:
+        sensor = base_env.scene["contact_forces"]
+    except Exception:
+        sensor = None
+
+    sensor_ids = getattr(base_env, "_eval_gait_foot_sensor_ids", None)
+    robot_ids = getattr(base_env, "_eval_gait_foot_robot_ids", None)
+    if not isinstance(sensor_ids, torch.Tensor) or int(sensor_ids.numel()) != int(foot_body_ids.numel()):
+        sensor_ids = foot_body_ids
+    if not isinstance(robot_ids, torch.Tensor) or int(robot_ids.numel()) != int(foot_body_ids.numel()):
+        robot_ids = foot_body_ids
+
+    contact_force = None
+    if sensor is not None and hasattr(sensor.data, "net_forces_w"):
+        if int(torch.max(sensor_ids).item()) < int(sensor.data.net_forces_w.shape[1]):
+            forces = sensor.data.net_forces_w[:, sensor_ids, :]
+            contact_force = torch.norm(forces, dim=-1)
+    if contact_force is None:
+        contact_forces = _get_contact_forces_tensor(base_env)
+        if contact_forces is None or int(torch.max(foot_body_ids).item()) >= int(contact_forces.shape[1]):
+            return {"available": False}
+        contact_force = torch.norm(contact_forces[:, foot_body_ids, :], dim=-1)
+
+    if int(torch.max(robot_ids).item()) >= int(body_lin_vel.shape[1]):
         return {"available": False}
 
-    fz = torch.abs(contact_forces[:, foot_body_ids, 2])
-    contact = fz > float(contact_force_threshold)
-    foot_vel_xy = body_lin_vel[:, foot_body_ids, :2]
+    contact = contact_force > float(contact_force_threshold)
+    foot_vel_xy = body_lin_vel[:, robot_ids, :2]
     foot_speed_xy = torch.norm(foot_vel_xy, dim=-1)
-    return {
+    result = {
         "available": True,
         "contact": contact.detach().cpu(),
         "foot_speed_xy": foot_speed_xy.detach().cpu(),
     }
+    clearance_params = _clearance_eval_params(base_env)
+    if clearance_params is None or body_pos_w is None:
+        return result
+
+    try:
+        contact_sensor = base_env.scene["contact_forces"]
+        reward_force_threshold = float(
+            getattr(getattr(contact_sensor, "cfg", None), "force_threshold", contact_force_threshold)
+        )
+    except Exception:
+        reward_force_threshold = float(contact_force_threshold)
+
+    try:
+        height_sensor = base_env.scene["height_scanner"]
+    except Exception:
+        return result
+
+    if int(torch.max(robot_ids).item()) >= int(body_pos_w.shape[1]):
+        return result
+    foot_pos_w = body_pos_w[:, robot_ids, :]
+    terrain_z = _nearest_height_scanner_hits(height_sensor, foot_pos_w)
+    if terrain_z is None:
+        return result
+
+    foot_clearance_m = foot_pos_w[:, :, 2] - terrain_z
+    swing_active = (contact_force <= reward_force_threshold) & (
+        foot_speed_xy > float(clearance_params["speed_threshold_mps"])
+    )
+    result.update(
+        {
+            "foot_clearance_m": foot_clearance_m.detach().cpu(),
+            "clearance_active": swing_active.detach().cpu(),
+            "clearance_target_m": float(clearance_params["target_height"]),
+            "clearance_hit_tolerance_m": float(clearance_params["hit_tolerance_m"]),
+            "clearance_low_threshold_m": float(clearance_params["low_threshold_m"]),
+            "clearance_scuff_threshold_m": float(clearance_params["scuff_threshold_m"]),
+        }
+    )
+    return result
 
 
 def _terminal_scalar(terminal_metrics: dict, terminal_lookup: dict[int, int], env_idx: int, key: str) -> float | None:
@@ -1196,6 +1437,7 @@ def run_evaluation(
     nonzero_cmd_threshold: float = 0.05,
     stand_cmd_threshold: float = 0.01,
     contact_force_threshold: float = 15.0,
+    contact_force_threshold_source: str = "cli",
     eval_foot_body_names: list[str] | None = None,
     eval_debug_print_body_names: bool = False,
     cls_stand_actual_max: float = 0.05,
@@ -1303,11 +1545,21 @@ def run_evaluation(
     num_feet = int(foot_body_ids.numel()) if foot_body_ids is not None else 0
     ep_gait_valid_steps = torch.zeros(num_envs, dtype=torch.float32)
     ep_gait_quad_support_steps = torch.zeros(num_envs, dtype=torch.float32)
+    ep_clearance_sample_count = torch.zeros(num_envs, dtype=torch.float32)
+    ep_clearance_sum = torch.zeros(num_envs, dtype=torch.float32)
+    ep_clearance_abs_error_sum = torch.zeros(num_envs, dtype=torch.float32)
+    ep_clearance_shortfall_sum = torch.zeros(num_envs, dtype=torch.float32)
+    ep_clearance_low_count = torch.zeros(num_envs, dtype=torch.float32)
+    ep_clearance_scuff_count = torch.zeros(num_envs, dtype=torch.float32)
+    ep_scuff_contact_count = torch.zeros(num_envs, dtype=torch.float32)
+    ep_clearance_hit_count = torch.zeros(num_envs, dtype=torch.float32)
+    ep_clearance_min = torch.full((num_envs,), float("inf"), dtype=torch.float32)
     if num_feet > 0:
         ep_gait_contact_steps = torch.zeros((num_envs, num_feet), dtype=torch.float32)
         ep_gait_touchdown_count = torch.zeros((num_envs, num_feet), dtype=torch.float32)
         ep_gait_slip_distance = torch.zeros((num_envs, num_feet), dtype=torch.float32)
         prev_contact = torch.zeros((num_envs, num_feet), dtype=torch.bool)
+        prev_scuff_candidate = torch.zeros((num_envs, num_feet), dtype=torch.bool)
         gait_pre_init = collect_gait_contact_metrics(
             env,
             foot_body_ids=foot_body_ids,
@@ -1320,6 +1572,7 @@ def run_evaluation(
         ep_gait_touchdown_count = None
         ep_gait_slip_distance = None
         prev_contact = None
+        prev_scuff_candidate = None
 
     reward_breakdown = _RewardBreakdownCollector(env.unwrapped)
     ep_term_signed = {name: torch.zeros(num_envs, dtype=torch.float32) for name in reward_breakdown.term_names}
@@ -1515,6 +1768,9 @@ def run_evaluation(
         observed_cmd_speed_max = max(observed_cmd_speed_max, float(torch.max(cmd_speed_xy).item()))
         ts_contact_pre = None
         ts_foot_speed_pre = None
+        ts_clearance_pre = None
+        ts_clearance_active_pre = None
+        ts_scuff_contact_pre = None
 
         sat_step = base_env.motor_deg_state.torque_saturation.detach().cpu().to(torch.float32)
         ep_sat_joint_over_0p95_steps += (sat_step > 0.95).to(torch.float32)
@@ -1532,15 +1788,71 @@ def run_evaluation(
                 contact = gait["contact"]
                 foot_speed_xy = gait["foot_speed_xy"]
                 touchdown = (~prev_contact) & contact
+                scuff_contact = None
                 ep_gait_touchdown_count += touchdown.to(torch.float32)
                 ep_gait_contact_steps += contact.to(torch.float32)
                 ep_gait_quad_support_steps += torch.all(contact, dim=1).to(torch.float32)
                 ep_gait_slip_distance += contact.to(torch.float32) * foot_speed_xy * dt
                 ep_gait_valid_steps += 1.0
+                clearance = gait.get("foot_clearance_m", None)
+                clearance_active = gait.get("clearance_active", None)
+                if isinstance(clearance, torch.Tensor) and isinstance(clearance_active, torch.Tensor):
+                    clearance_active_f = clearance_active.to(torch.float32)
+                    clearance_count = torch.sum(clearance_active_f, dim=1)
+                    ep_clearance_sample_count += clearance_count
+                    ep_clearance_sum += torch.sum(clearance * clearance_active_f, dim=1)
+                    low_thr = float(gait.get("clearance_low_threshold_m", 0.02))
+                    scuff_thr = float(gait.get("clearance_scuff_threshold_m", 0.01))
+                    target_height = float(gait.get("clearance_target_m", 0.04))
+                    hit_tol = float(gait.get("clearance_hit_tolerance_m", 0.01))
+                    ep_clearance_abs_error_sum += torch.sum(
+                        torch.abs(clearance - target_height) * clearance_active_f, dim=1
+                    )
+                    ep_clearance_shortfall_sum += torch.sum(
+                        torch.clamp(target_height - clearance, min=0.0) * clearance_active_f, dim=1
+                    )
+                    ep_clearance_low_count += torch.sum(
+                        clearance_active & (clearance < low_thr), dim=1
+                    ).to(torch.float32)
+                    ep_clearance_scuff_count += torch.sum(
+                        clearance_active & (clearance < scuff_thr), dim=1
+                    ).to(torch.float32)
+                    scuff_candidate = clearance_active & (clearance < scuff_thr)
+                    if prev_scuff_candidate is not None:
+                        scuff_contact = touchdown & prev_scuff_candidate
+                        ep_scuff_contact_count += torch.sum(scuff_contact, dim=1).to(torch.float32)
+                    ep_clearance_hit_count += torch.sum(
+                        clearance_active & (torch.abs(clearance - target_height) <= hit_tol), dim=1
+                    ).to(torch.float32)
+                    clearance_min_step = torch.min(
+                        torch.where(
+                            clearance_active,
+                            clearance,
+                            torch.full_like(clearance, float("inf")),
+                        ),
+                        dim=1,
+                    ).values
+                    valid_clearance = clearance_count > 0.0
+                    ep_clearance_min = torch.where(
+                        valid_clearance,
+                        torch.minimum(ep_clearance_min, clearance_min_step),
+                        ep_clearance_min,
+                    )
+                    if prev_scuff_candidate is not None:
+                        prev_scuff_candidate = scuff_candidate
+                    if ts_enabled and (not ts_dumped) and isinstance(scuff_contact, torch.Tensor):
+                        ts_scuff_contact_pre = scuff_contact[ts_env].tolist()
+                elif prev_scuff_candidate is not None:
+                    prev_scuff_candidate[:] = False
                 prev_contact = contact
                 if ts_enabled and (not ts_dumped):
                     ts_contact_pre = contact[ts_env].tolist()
                     ts_foot_speed_pre = foot_speed_xy[ts_env].tolist()
+                    if isinstance(clearance, torch.Tensor) and isinstance(clearance_active, torch.Tensor):
+                        ts_clearance_pre = clearance[ts_env].tolist()
+                        ts_clearance_active_pre = clearance_active[ts_env].tolist()
+            elif prev_scuff_candidate is not None:
+                prev_scuff_candidate[:] = False
 
         ts_row_pre: dict[str, Any] | None = None
         if ts_enabled and (not ts_dumped) and (len(ts_rows) < ts_max_steps):
@@ -1591,6 +1903,12 @@ def run_evaluation(
                     ts_row_pre[f"contact_{safe_name}"] = int(bool(v))
                     if ts_foot_speed_pre is not None and k < len(ts_foot_speed_pre):
                         ts_row_pre[f"foot_speed_xy_{safe_name}"] = float(ts_foot_speed_pre[k])
+                    if ts_clearance_pre is not None and k < len(ts_clearance_pre):
+                        ts_row_pre[f"foot_clearance_m_{safe_name}"] = float(ts_clearance_pre[k])
+                    if ts_clearance_active_pre is not None and k < len(ts_clearance_active_pre):
+                        ts_row_pre[f"clearance_active_{safe_name}"] = int(bool(ts_clearance_active_pre[k]))
+                    if ts_scuff_contact_pre is not None and k < len(ts_scuff_contact_pre):
+                        ts_row_pre[f"scuff_contact_{safe_name}"] = int(bool(ts_scuff_contact_pre[k]))
                     contact_count += int(bool(v))
                 ts_row_pre["contact_count"] = int(contact_count)
             else:
@@ -1937,12 +2255,23 @@ def run_evaluation(
                     ep_max_saturation_step_history[idx] = []
                     ep_gait_valid_steps[idx] = 0.0
                     ep_gait_quad_support_steps[idx] = 0.0
+                    ep_clearance_sample_count[idx] = 0.0
+                    ep_clearance_sum[idx] = 0.0
+                    ep_clearance_abs_error_sum[idx] = 0.0
+                    ep_clearance_shortfall_sum[idx] = 0.0
+                    ep_clearance_low_count[idx] = 0.0
+                    ep_clearance_scuff_count[idx] = 0.0
+                    ep_scuff_contact_count[idx] = 0.0
+                    ep_clearance_hit_count[idx] = 0.0
+                    ep_clearance_min[idx] = float("inf")
                     if num_feet > 0 and ep_gait_contact_steps is not None and ep_gait_touchdown_count is not None and ep_gait_slip_distance is not None:
                         ep_gait_contact_steps[idx] = 0.0
                         ep_gait_touchdown_count[idx] = 0.0
                         ep_gait_slip_distance[idx] = 0.0
                         if prev_contact is not None:
                             prev_contact[idx] = False
+                        if prev_scuff_candidate is not None:
+                            prev_scuff_candidate[idx] = False
                     for term_name in reward_breakdown.term_names:
                         ep_term_signed[term_name][idx] = 0.0
                         ep_term_abs[term_name][idx] = 0.0
@@ -2316,6 +2645,57 @@ def run_evaluation(
                     episode_metrics["gait_quad_support_ratio"].append(float("nan"))
                     episode_metrics["gait_slip_per_progress"].append(float("nan"))
 
+                touchdown_total = (
+                    float(torch.sum(ep_gait_touchdown_count[idx]).item())
+                    if num_feet > 0 and ep_gait_touchdown_count is not None
+                    else float("nan")
+                )
+                scuff_contact_count_ep = (
+                    float(ep_scuff_contact_count[idx].item())
+                    if num_feet > 0 and ep_gait_touchdown_count is not None
+                    else float("nan")
+                )
+                if np.isfinite(touchdown_total) and touchdown_total > 0.0 and np.isfinite(scuff_contact_count_ep):
+                    scuff_contact_ratio_ep = float(scuff_contact_count_ep / touchdown_total)
+                else:
+                    scuff_contact_ratio_ep = float("nan")
+                episode_metrics["scuff_contact_count_ep"].append(float(scuff_contact_count_ep))
+                episode_metrics["scuff_contact_ratio_ep"].append(float(scuff_contact_ratio_ep))
+
+                clearance_samples = float(ep_clearance_sample_count[idx].item())
+                clearance_available = 1.0 if clearance_samples > 0.5 else 0.0
+                episode_metrics["clearance_available"].append(float(clearance_available))
+                if clearance_available > 0.5:
+                    clearance_mean_ep = float(ep_clearance_sum[idx].item() / max(clearance_samples, 1.0))
+                    clearance_abs_error_mean_ep = float(
+                        ep_clearance_abs_error_sum[idx].item() / max(clearance_samples, 1.0)
+                    )
+                    clearance_shortfall_mean_ep = float(
+                        ep_clearance_shortfall_sum[idx].item() / max(clearance_samples, 1.0)
+                    )
+                    clearance_min_raw = float(ep_clearance_min[idx].item())
+                    clearance_min_ep = clearance_min_raw if np.isfinite(clearance_min_raw) else float("nan")
+                    low_clearance_ratio_ep = float(ep_clearance_low_count[idx].item() / max(clearance_samples, 1.0))
+                    scuff_ratio_ep = float(ep_clearance_scuff_count[idx].item() / max(clearance_samples, 1.0))
+                    clearance_target_hit_ratio_ep = float(
+                        ep_clearance_hit_count[idx].item() / max(clearance_samples, 1.0)
+                    )
+                    episode_metrics["swing_clearance_mean_ep"].append(clearance_mean_ep)
+                    episode_metrics["clearance_abs_error_mean_ep"].append(clearance_abs_error_mean_ep)
+                    episode_metrics["clearance_shortfall_mean_ep"].append(clearance_shortfall_mean_ep)
+                    episode_metrics["swing_clearance_min_ep"].append(clearance_min_ep)
+                    episode_metrics["low_clearance_ratio_ep"].append(low_clearance_ratio_ep)
+                    episode_metrics["scuff_ratio_ep"].append(scuff_ratio_ep)
+                    episode_metrics["clearance_target_hit_ratio_ep"].append(clearance_target_hit_ratio_ep)
+                else:
+                    episode_metrics["swing_clearance_mean_ep"].append(float("nan"))
+                    episode_metrics["clearance_abs_error_mean_ep"].append(float("nan"))
+                    episode_metrics["clearance_shortfall_mean_ep"].append(float("nan"))
+                    episode_metrics["swing_clearance_min_ep"].append(float("nan"))
+                    episode_metrics["low_clearance_ratio_ep"].append(float("nan"))
+                    episode_metrics["scuff_ratio_ep"].append(float("nan"))
+                    episode_metrics["clearance_target_hit_ratio_ep"].append(float("nan"))
+
                 # Walk / Stand / Shuffle episode classification.
                 mc = float(mean_cmd_speed)
                 ma = float(mean_actual_speed)
@@ -2430,12 +2810,23 @@ def run_evaluation(
                 ep_max_saturation_step_history[idx] = []
                 ep_gait_valid_steps[idx] = 0.0
                 ep_gait_quad_support_steps[idx] = 0.0
+                ep_clearance_sample_count[idx] = 0.0
+                ep_clearance_sum[idx] = 0.0
+                ep_clearance_abs_error_sum[idx] = 0.0
+                ep_clearance_shortfall_sum[idx] = 0.0
+                ep_clearance_low_count[idx] = 0.0
+                ep_clearance_scuff_count[idx] = 0.0
+                ep_scuff_contact_count[idx] = 0.0
+                ep_clearance_hit_count[idx] = 0.0
+                ep_clearance_min[idx] = float("inf")
                 if num_feet > 0 and ep_gait_contact_steps is not None and ep_gait_touchdown_count is not None and ep_gait_slip_distance is not None:
                     ep_gait_contact_steps[idx] = 0.0
                     ep_gait_touchdown_count[idx] = 0.0
                     ep_gait_slip_distance[idx] = 0.0
                     if prev_contact is not None:
                         prev_contact[idx] = False
+                    if prev_scuff_candidate is not None:
+                        prev_scuff_candidate[idx] = False
                 for term_name in reward_breakdown.term_names:
                     ep_term_signed[term_name][idx] = 0.0
                     ep_term_abs[term_name][idx] = 0.0
@@ -2463,6 +2854,8 @@ def run_evaluation(
                         prev_contact[done_ids_cpu] = gait_after_reset["contact"][done_ids_cpu]
                     else:
                         prev_contact[done_ids_cpu] = False
+                    if prev_scuff_candidate is not None:
+                        prev_scuff_candidate[done_ids_cpu] = False
 
         if completed_episodes > 0 and (completed_episodes // 20) > (last_reported_episodes // 20):
             surv = np.mean(episode_metrics["survived"][-20:]) if len(episode_metrics["survived"]) >= 20 else np.mean(episode_metrics["survived"])
@@ -2480,6 +2873,15 @@ def run_evaluation(
         "gait_step_count_total",
         "gait_quad_support_ratio",
         "gait_slip_per_progress",
+        "swing_clearance_mean_ep",
+        "clearance_abs_error_mean_ep",
+        "clearance_shortfall_mean_ep",
+        "swing_clearance_min_ep",
+        "low_clearance_ratio_ep",
+        "scuff_ratio_ep",
+        "scuff_contact_count_ep",
+        "scuff_contact_ratio_ep",
+        "clearance_target_hit_ratio_ep",
         "time_to_safe_stop_s",
         "time_to_fall_s",
         "energy_to_safe_stop_j",
@@ -2555,11 +2957,41 @@ def run_evaluation(
     if observed_cmd_speed_count > 0:
         summary["_debug_observed_cmd_speed_xy_mean"] = float(observed_cmd_speed_sum / observed_cmd_speed_count)
         summary["_debug_observed_cmd_speed_xy_max"] = float(observed_cmd_speed_max)
+    summary["_debug_scenario_key"] = str(scenario_name)
+    summary["_debug_scenario_label"] = str(_scenario_label(scenario_name))
     summary["_debug_cmd_nonzero_threshold"] = float(nonzero_cmd_threshold)
     summary["_debug_cmd_stand_threshold"] = float(stand_cmd_threshold)
     summary["_debug_eval_contact_force_threshold"] = float(contact_force_threshold)
+    summary["_debug_eval_contact_force_threshold_source"] = str(contact_force_threshold_source)
     summary["_debug_eval_foot_body_resolve_status"] = str(foot_resolve_status)
     summary["_debug_eval_foot_body_names"] = list(resolved_foot_names)
+    clearance_eval_params = _clearance_eval_params(base_env)
+    summary["_debug_clearance_metric_config"] = (
+        {
+            "target_height_m": float(clearance_eval_params["target_height"]),
+            "hit_tolerance_m": float(clearance_eval_params["hit_tolerance_m"]),
+            "low_threshold_m": float(clearance_eval_params["low_threshold_m"]),
+            "scuff_threshold_m": float(clearance_eval_params["scuff_threshold_m"]),
+            "speed_threshold_mps": float(clearance_eval_params["speed_threshold_mps"]),
+        }
+        if clearance_eval_params is not None
+        else None
+    )
+    summary["_debug_clearance_metric_semantics"] = {
+        "swing_clearance_mean_ep": "episode_mean[terrain-relative clearance over active swing samples]",
+        "swing_clearance_min_ep": "episode_min[terrain-relative clearance over active swing samples]",
+        "clearance_abs_error_mean_ep": "episode_mean[|clearance - target_height| over active swing samples]",
+        "clearance_shortfall_mean_ep": "episode_mean[max(target_height - clearance, 0)] over active swing samples",
+        "low_clearance_ratio_ep": "episode_ratio[active swing samples with clearance < low_threshold]",
+        "scuff_ratio_ep": "episode_ratio[active swing samples with clearance < scuff_threshold]",
+        "scuff_contact_count_ep": (
+            "episode_count[touchdown events preceded by previous-step low-clearance swing sample]"
+        ),
+        "scuff_contact_ratio_ep": (
+            "episode_ratio[scuff_contact_count_ep / total touchdown events]"
+        ),
+        "clearance_target_hit_ratio_ep": "episode_ratio[active swing samples within hit_tolerance of target_height]",
+    }
     summary["_debug_safe_stop_thresholds"] = {
         "safe_stop_lin_vel_max": float(safe_stop_lin_vel_max),
         "safe_stop_ang_vel_max": float(safe_stop_ang_vel_max),
@@ -2646,7 +3078,8 @@ def run_evaluation(
     }
     summary["_debug_timeseries_dump"] = {
         "enabled": bool(ts_enabled),
-        "scenario": str(dump_timeseries_scenario),
+        "scenario": str(_scenario_label(dump_timeseries_scenario)),
+        "scenario_key": str(dump_timeseries_scenario),
         "env_id": int(ts_env),
         "max_steps": int(ts_max_steps),
         "rows_collected": int(len(ts_rows)),
@@ -2728,6 +3161,16 @@ def run_evaluation(
         "gait_step_count_total",
         "gait_quad_support_ratio",
         "gait_slip_per_progress",
+        "clearance_available",
+        "swing_clearance_mean_ep",
+        "clearance_abs_error_mean_ep",
+        "clearance_shortfall_mean_ep",
+        "swing_clearance_min_ep",
+        "low_clearance_ratio_ep",
+        "scuff_ratio_ep",
+        "scuff_contact_count_ep",
+        "scuff_contact_ratio_ep",
+        "clearance_target_hit_ratio_ep",
         "safe_stop_success",
         "safe_stop_success_rate",
         "time_to_safe_stop_s",
@@ -2860,6 +3303,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"Invalid --eval_protocol_mode={eval_protocol_mode} "
             "(expected combined|locomotion_only|safety_only)."
         )
+    dump_timeseries_scenario_key = _scenario_key(str(args_cli.eval_dump_timeseries_scenario))
 
     requested_eval_cmd_profile = str(args_cli.eval_cmd_profile).strip().lower()
     effective_eval_cmd_profile = requested_eval_cmd_profile
@@ -2940,16 +3384,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         paper_b_obs_ablation=args_cli.paper_b_obs_ablation,
         paper_b_sensor_preset=args_cli.paper_b_sensor_preset,
     )
+    eval_terrain_profile_info = _apply_eval_terrain_profile(env_cfg, args_cli.eval_terrain_profile)
 
     # Create environment
     env = gym.make(args_cli.task, cfg=env_cfg)
+    eval_contact_force_threshold, eval_contact_force_threshold_source = _resolve_eval_contact_force_threshold(
+        env.unwrapped,
+        float(args_cli.eval_contact_force_threshold),
+    )
+    if str(eval_contact_force_threshold_source) != "cli":
+        print(
+            f"[INFO] Eval gait contact threshold inferred from {eval_contact_force_threshold_source}: "
+            f"{eval_contact_force_threshold:.2f} N"
+        )
     if hasattr(env, "unwrapped"):
         try:
             if hasattr(env.unwrapped, "configure_eval_gait_metrics"):
                 env.unwrapped.configure_eval_gait_metrics(
                     enabled=True,
                     foot_body_names=eval_foot_body_names,
-                    contact_force_threshold=float(args_cli.eval_contact_force_threshold),
+                    contact_force_threshold=float(eval_contact_force_threshold),
                     nonzero_cmd_threshold=float(args_cli.eval_nonzero_cmd_threshold),
                     stand_cmd_threshold=float(args_cli.eval_stand_cmd_threshold),
                 )
@@ -2965,6 +3419,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
     elif "warning" in eval_cmd_profile_info:
         print(f"[WARN] {eval_cmd_profile_info['warning']}")
+    if bool(eval_terrain_profile_info.get("applied", False)):
+        print(
+            "[INFO] Eval terrain profile applied:",
+            json.dumps(eval_terrain_profile_info, ensure_ascii=False),
+        )
+    elif str(eval_terrain_profile_info.get("requested", "from_env")) != "from_env":
+        print(
+            "[WARN] Eval terrain profile override not applied:",
+            json.dumps(eval_terrain_profile_info, ensure_ascii=False),
+        )
     if eval_velocity_curriculum_disabled:
         print("[INFO] Velocity command curriculum disabled for this evaluation run.")
     if hasattr(env.unwrapped, "_enable_terminal_snapshot"):
@@ -3003,7 +3467,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # Run selected scenarios by protocol mode.
     all_results = {}
-    print(f"[INFO] Eval protocol mode: {eval_protocol_mode} | scenarios={scenario_names_for_run}")
+    print(
+        f"[INFO] Eval protocol mode: {eval_protocol_mode} | "
+        f"scenarios={_scenario_labels(scenario_names_for_run)}"
+    )
     for scenario_name in scenario_names_for_run:
         summary = run_evaluation(
             env,
@@ -3014,7 +3481,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             temp_metric_semantics=temp_metric_semantics,
             nonzero_cmd_threshold=float(args_cli.eval_nonzero_cmd_threshold),
             stand_cmd_threshold=float(args_cli.eval_stand_cmd_threshold),
-            contact_force_threshold=float(args_cli.eval_contact_force_threshold),
+            contact_force_threshold=float(eval_contact_force_threshold),
+            contact_force_threshold_source=str(eval_contact_force_threshold_source),
             eval_foot_body_names=eval_foot_body_names,
             eval_debug_print_body_names=bool(args_cli.eval_debug_print_body_names),
             cls_stand_actual_max=float(args_cli.eval_cls_stand_actual_max),
@@ -3038,7 +3506,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             crit_cmd_delta_active_eps=float(args_cli.eval_crit_cmd_delta_active_eps),
             thermal_threshold_c=float(threshold_temp) if threshold_temp is not None else None,
             dump_timeseries=bool(args_cli.eval_dump_timeseries),
-            dump_timeseries_scenario=str(args_cli.eval_dump_timeseries_scenario),
+            dump_timeseries_scenario=str(dump_timeseries_scenario_key),
             dump_timeseries_env_id=int(args_cli.eval_dump_timeseries_env_id),
             dump_timeseries_max_steps=int(args_cli.eval_dump_timeseries_max_steps),
             dump_timeseries_output_dir=str(output_dir),
@@ -3135,11 +3603,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "paper_b_obs_ablation": str(getattr(env.unwrapped.cfg, "paper_b_obs_ablation", "none")),
         "paper_b_sensor_preset": str(getattr(env.unwrapped.cfg, "paper_b_sensor_preset", "full")),
         "paper_b_runtime_overrides": paper_b_runtime_cfg,
+        "eval_terrain_profile": str(args_cli.eval_terrain_profile),
+        "eval_terrain_profile_info": eval_terrain_profile_info,
         "paper_b_family": str(paper_b_contract_summary["paper_b_family"]),
         "paper_b_variant": str(paper_b_contract_summary["paper_b_variant"]),
         "paper_b_observation_scope": str(paper_b_contract_summary["paper_b_observation_scope"]),
         "paper_b_reward_scope": str(paper_b_contract_summary["paper_b_reward_scope"]),
         "paper_b_deployable": bool(paper_b_contract_summary["paper_b_deployable"]),
+        "eval_contact_force_threshold": float(eval_contact_force_threshold),
+        "eval_contact_force_threshold_source": str(eval_contact_force_threshold_source),
         "realobs_require_voltage_sensor": bool(getattr(env.unwrapped.cfg, "realobs_require_voltage_sensor", False)),
         "realobs_allow_true_voltage_fallback": bool(
             getattr(env.unwrapped.cfg, "realobs_allow_true_voltage_fallback", False)
@@ -3170,7 +3642,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "paper_protocol_strict": bool(args_cli.paper_protocol_strict),
         "paper_protocol_fixed_fault_eval": is_fixed_fault_eval,
         "eval_protocol_mode": str(eval_protocol_mode),
-        "eval_scenarios": list(scenario_names_for_run),
+        "eval_scenarios": list(_scenario_labels(scenario_names_for_run)),
+        "eval_scenario_keys": list(scenario_names_for_run),
+        "eval_scenario_label_map": {key: PAPER_SCENARIO_LABELS[key] for key in scenario_names_for_run},
         "eval_cmd_profile": str(effective_eval_cmd_profile),
         "eval_cmd_profile_requested": str(requested_eval_cmd_profile),
         "eval_cmd_profile_effective": str(effective_eval_cmd_profile),
@@ -3195,10 +3669,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "eval_oracle_safe_stop_steps": int(args_cli.eval_oracle_safe_stop_steps),
         "eval_crit_cmd_delta_active_eps": float(args_cli.eval_crit_cmd_delta_active_eps),
         "eval_dump_timeseries": bool(args_cli.eval_dump_timeseries),
-        "eval_dump_timeseries_scenario": str(args_cli.eval_dump_timeseries_scenario),
+        "eval_dump_timeseries_scenario": str(_scenario_label(dump_timeseries_scenario_key)),
+        "eval_dump_timeseries_scenario_key": str(dump_timeseries_scenario_key),
         "eval_dump_timeseries_env_id": int(args_cli.eval_dump_timeseries_env_id),
         "eval_dump_timeseries_max_steps": int(args_cli.eval_dump_timeseries_max_steps),
-        "eval_contact_force_threshold": float(args_cli.eval_contact_force_threshold),
+        "eval_contact_force_threshold_requested": float(args_cli.eval_contact_force_threshold),
         "eval_debug_print_body_names": bool(args_cli.eval_debug_print_body_names),
         "eval_foot_body_names": list(eval_foot_body_names or []),
         "eval_contact_sensor_enable_path": contact_sensor_enable_path,
@@ -3268,6 +3743,7 @@ def print_safety_table(results: dict, temp_metric_semantics: str = "coil_hotspot
     print("-" * 296)
 
     for scenario_name, summary in results.items():
+        scenario_label = _scenario_label(scenario_name)
         safe_rate = summary.get("safe_stop_success_rate", {}).get("mean", float("nan")) * 100.0
         t_safe_stats = summary.get("time_to_safe_stop_s", {})
         t_fall_stats = summary.get("time_to_fall_s", {})
@@ -3308,7 +3784,7 @@ def print_safety_table(results: dict, temp_metric_semantics: str = "coil_hotspot
         e_safe_n = int(e_safe_stats.get("valid_count", e_safe_stats.get("count", 0)))
 
         row = (
-            f"{scenario_name:<12} | {safe_rate:>9.1f}% | {t_safe:>10.2f} | {t_safe_n:>6d} | "
+            f"{scenario_label:<12} | {safe_rate:>9.1f}% | {t_safe:>10.2f} | {t_safe_n:>6d} | "
             f"{t_fall:>10.2f} | {t_fall_n:>6d} | {e_safe:>10.2f} | {e_safe_n:>6d} | "
             f"{peak_temp:>9.2f}C | {therm_margin:>10.2f}C | {peak_sat:>8.3f} | {gov_sat_ep:>8.1f}% | {latch_ratio:>6.1f}% | "
             f"{latched_step_ratio:>7.1f}% | {sat_window_ratio:>7.1f}% | {cmd_delta_active_ratio:>8.1f}% | "
@@ -3337,6 +3813,7 @@ def print_paper_table(results: dict, temp_metric_semantics: str = "coil_hotspot"
     print("-" * 90)
 
     for scenario_name, summary in results.items():
+        scenario_label = _scenario_label(scenario_name)
         surv = summary.get("survived", {}).get("mean", 0) * 100
         trk = summary.get("mean_tracking_error_xy", {}).get("mean", 0)
         pwr = summary.get("mean_power", {}).get("mean", 0)
@@ -3345,7 +3822,7 @@ def print_paper_table(results: dict, temp_metric_semantics: str = "coil_hotspot"
         tmp = summary.get(temp_key, summary.get("final_max_temp", {})).get("mean", 0)
         soc = summary.get("final_soc", {}).get("mean", 0)
 
-        row = f"{scenario_name:<12} | {surv:>9.1f}% | {trk:>10.4f} | {pwr:>10.1f} | {eng:>10.1f} | {tmp:>11.1f}°C | {soc:>10.3f}"
+        row = f"{scenario_label:<12} | {surv:>9.1f}% | {trk:>10.4f} | {pwr:>10.1f} | {eng:>10.1f} | {tmp:>11.1f}°C | {soc:>10.3f}"
         print(row)
 
     print("=" * 90)

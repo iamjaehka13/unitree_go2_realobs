@@ -9,6 +9,23 @@ import statistics
 from pathlib import Path
 from typing import Any
 
+PAPER_SCENARIO_LABELS = {
+    "fresh": "nominal",
+    "used": "moderate",
+    "aged": "severe",
+    "critical": "critical",
+}
+SCENARIO_CLI_ALIASES = {
+    "fresh": "fresh",
+    "used": "used",
+    "aged": "aged",
+    "critical": "critical",
+    "nominal": "fresh",
+    "moderate": "used",
+    "severe": "aged",
+    "safety_critical": "critical",
+}
+
 
 MIRROR_PAIRS = ((0, 3), (1, 4), (2, 5), (6, 9), (7, 10), (8, 11))
 JOINT_TYPE_GROUPS = {
@@ -65,7 +82,8 @@ def _collect_runs(eval_results_dir: Path, glob_pattern: str) -> dict[int, dict[s
 
 
 def _metric_mean(eval_result: dict[str, Any], scenario: str, metric: str) -> float:
-    s = eval_result.get(scenario, {})
+    scenario_key = _scenario_key(scenario)
+    s = eval_result.get(scenario_key, {})
     if not isinstance(s, dict):
         return float("nan")
     v = s.get(metric, None)
@@ -74,6 +92,18 @@ def _metric_mean(eval_result: dict[str, Any], scenario: str, metric: str) -> flo
     if isinstance(v, (int, float)):
         return float(v)
     return float("nan")
+
+
+def _scenario_key(name: str) -> str:
+    key = SCENARIO_CLI_ALIASES.get(str(name).strip().lower())
+    if key is None:
+        valid = ", ".join(sorted(SCENARIO_CLI_ALIASES.keys()))
+        raise ValueError(f"Unknown scenario name '{name}'. Expected one of: {valid}")
+    return key
+
+
+def _scenario_label(name: str) -> str:
+    return PAPER_SCENARIO_LABELS.get(_scenario_key(name), str(name).strip().lower())
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -188,7 +218,8 @@ def _rows_for_csv(combined_summary: dict[str, Any]) -> list[dict[str, Any]]:
             for metric, payload in metric_map.items():
                 row = {
                     "variant": variant,
-                    "scenario": scenario,
+                    "scenario": _scenario_label(scenario),
+                    "scenario_key": scenario,
                     "metric": metric,
                     "n": payload.get("n"),
                     "n_valid": payload.get("n_valid"),
@@ -212,6 +243,8 @@ def _rows_for_csv(combined_summary: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _print_compact_table(summary: dict[str, Any], scenario: str, metric: str):
+    scenario_key = _scenario_key(scenario)
+    scenario_label = _scenario_label(scenario_key)
     print("=" * 112)
     print(
         f"{'Variant':<12} | {'Scenario':<10} | {'Metric':<18} | {'Mean±Std':<20} | "
@@ -221,7 +254,7 @@ def _print_compact_table(summary: dict[str, Any], scenario: str, metric: str):
     for variant, variant_summary in summary.items():
         payload = (
             variant_summary.get("scenarios", {})
-            .get(scenario, {})
+            .get(scenario_key, {})
             .get(metric, {})
         )
         if len(payload) == 0:
@@ -232,7 +265,7 @@ def _print_compact_table(summary: dict[str, Any], scenario: str, metric: str):
         p10 = float(payload.get("p10", float("nan")))
         gap = float(payload.get("pair_gap_7_10", float("nan")))
         print(
-            f"{variant:<12} | {scenario:<10} | {metric:<18} | "
+            f"{variant:<12} | {scenario_label:<10} | {metric:<18} | "
             f"{mean:.4f} +/- {std:.4f}   | min={min_v:.4f}, p10={p10:.4f}   | {gap:>14.4f}"
         )
     print("=" * 112)
@@ -272,8 +305,8 @@ def main():
     parser.add_argument(
         "--scenarios",
         nargs="+",
-        default=["fresh", "used", "aged", "critical"],
-        help="Scenario names to summarize.",
+        default=["nominal", "moderate", "severe", "critical"],
+        help="Scenario names to summarize (paper labels or legacy internal keys).",
     )
     parser.add_argument(
         "--metrics",
@@ -285,7 +318,7 @@ def main():
         "--table_scenario",
         type=str,
         default="critical",
-        help="Scenario used for compact stdout table.",
+        help="Scenario used for compact stdout table (paper label or legacy internal key).",
     )
     parser.add_argument(
         "--table_metric",
@@ -319,13 +352,17 @@ def main():
         raise ValueError("Provide either repeatable --variant name=glob or both --realobs_glob and --baseline_glob.")
 
     combined_summary = {}
+    scenario_keys = [_scenario_key(s) for s in list(args.scenarios)]
     for variant_name, glob_pattern in variant_specs.items():
         variant_runs = _collect_runs(eval_results_dir, glob_pattern)
         combined_summary[variant_name] = _build_variant_summary(
             variant_runs,
-            scenarios=list(args.scenarios),
+            scenarios=scenario_keys,
             metrics=list(args.metrics),
         )
+        combined_summary[variant_name]["scenario_labels"] = {
+            key: _scenario_label(key) for key in scenario_keys
+        }
 
     out_json = Path(args.out_json)
     out_json.parent.mkdir(parents=True, exist_ok=True)

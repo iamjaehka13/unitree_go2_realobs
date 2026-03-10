@@ -15,6 +15,33 @@ import sys
 
 from isaaclab.app import AppLauncher
 
+PAPER_SCENARIO_LABELS = {
+    "fresh": "nominal",
+    "used": "moderate",
+    "aged": "severe",
+    "critical": "critical",
+}
+SCENARIO_CLI_ALIASES = {
+    "none": "none",
+    "fresh": "fresh",
+    "used": "used",
+    "aged": "aged",
+    "critical": "critical",
+    "nominal": "fresh",
+    "moderate": "used",
+    "severe": "aged",
+    "safety_critical": "critical",
+}
+SCENARIO_CLI_CHOICES = sorted(set(SCENARIO_CLI_ALIASES.keys()))
+
+
+def _scenario_key(name: str) -> str:
+    key = SCENARIO_CLI_ALIASES.get(str(name).strip().lower())
+    if key is None:
+        valid = ", ".join(sorted(SCENARIO_CLI_ALIASES.keys()))
+        raise ValueError(f"Unknown scenario name '{name}'. Expected one of: {valid}")
+    return key
+
 # local imports
 import cli_args  # isort: skip
 
@@ -64,8 +91,8 @@ parser.add_argument(
     "--force_fault_scenario",
     type=str,
     default="none",
-    choices=["none", "fresh", "used", "aged", "critical"],
-    help="Force MotorDeg reset scenario during play for visualization/debug (default: none).",
+    choices=SCENARIO_CLI_CHOICES,
+    help="Force MotorDeg reset scenario during play for visualization/debug (paper labels or legacy keys).",
 )
 parser.add_argument(
     "--force_fault_motor_id",
@@ -378,10 +405,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # Optional MotorDeg forcing for playback/debug:
     # default play starts near step 0, where curriculum is often fresh-dominant.
-    force_scenario = str(args_cli.force_fault_scenario).strip().lower()
+    force_scenario = _scenario_key(str(args_cli.force_fault_scenario))
     if force_scenario != "none":
         setattr(env_cfg, "motor_deg_force_scenario_label", force_scenario)
-        print(f"[Play] force_fault_scenario enabled: {force_scenario}")
+        print(
+            f"[Play] force_fault_scenario enabled: "
+            f"{PAPER_SCENARIO_LABELS.get(force_scenario, force_scenario)} ({force_scenario})"
+        )
     if int(args_cli.force_fault_motor_id) >= 0:
         motor_id = int(args_cli.force_fault_motor_id)
         if 0 <= motor_id < 12:

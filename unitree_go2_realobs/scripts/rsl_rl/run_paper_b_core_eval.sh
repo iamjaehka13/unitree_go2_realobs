@@ -30,6 +30,7 @@ EVAL_STAMP="${EVAL_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 OBS_ABLATION="${OBS_ABLATION:-none}"
 SENSOR_PRESET="${SENSOR_PRESET:-full}"
 GOVERNOR_MODE="${GOVERNOR_MODE:-from_env}"  # from_env | off | on | both
+EVAL_TERRAIN_PROFILE="${EVAL_TERRAIN_PROFILE:-from_env}"  # from_env | flat_only | mild_rough_only
 EVAL_FORCED_WALK_LIN_X_MIN="${EVAL_FORCED_WALK_LIN_X_MIN:-}"
 EVAL_FORCED_WALK_LIN_X_MAX="${EVAL_FORCED_WALK_LIN_X_MAX:-}"
 EVAL_FORCED_WALK_ANG_Z_MIN="${EVAL_FORCED_WALK_ANG_Z_MIN:-}"
@@ -41,6 +42,10 @@ if [[ "$MODE" != "baseline" && "$MODE" != "obsonly" && "$MODE" != "realobs" && "
 fi
 if [[ "$GOVERNOR_MODE" != "from_env" && "$GOVERNOR_MODE" != "off" && "$GOVERNOR_MODE" != "on" && "$GOVERNOR_MODE" != "both" ]]; then
   echo "[ERROR] GOVERNOR_MODE must be one of: from_env | off | on | both" >&2
+  exit 1
+fi
+if [[ "$EVAL_TERRAIN_PROFILE" != "from_env" && "$EVAL_TERRAIN_PROFILE" != "flat_only" && "$EVAL_TERRAIN_PROFILE" != "mild_rough_only" ]]; then
+  echo "[ERROR] EVAL_TERRAIN_PROFILE must be one of: from_env | flat_only | mild_rough_only" >&2
   exit 1
 fi
 
@@ -130,6 +135,7 @@ run_one_variant() {
       --eval_fault_motor_id "${mid}"
       --paper_b_obs_ablation "${task_obs_ablation}"
       --paper_b_sensor_preset "${SENSOR_PRESET}"
+      --eval_terrain_profile "${EVAL_TERRAIN_PROFILE}"
       "${governor_flag[@]}"
     )
 
