@@ -11,7 +11,7 @@ Unitree Go2 RealObs 프로젝트: 모터(전기) 모델링 구조 설명 (PD -> 
 1) 메인(물리) 경로는 "정책이 토크를 직접 만들고 전류/전압으로 가는 구조"가 아니라,
    "정책은 관절 위치 타겟을 주고, PhysX/IsaacLab의 Implicit PD가 토크를 생성"합니다.
    그리고 우리는 그 결과로 물리엔진이 실제로 적용한 토크(applied_torque)를 읽어
-   전류/전력/전압 sag(SOC 기반)으로 연결해 PHM 상태를 업데이트합니다.
+   전류/전력/전압 sag(SOC 기반)으로 연결해 열화/건전성 상태를 업데이트합니다.
 
 2) 다만, brownout(저전압 제한) 같은 BMS-관점 전압 예측은 물리 시뮬레이션 전(substep 0)에
    applied_torque를 알 수 없으므로, PD 공식으로 “요구 토크”를 추정해서 전압을 예측합니다.
@@ -20,7 +20,7 @@ Unitree Go2 RealObs 프로젝트: 모터(전기) 모델링 구조 설명 (PD -> 
 전체 구조(그림)
 ---------------
 [정책/액션] -> (joint position target) -> [PhysX Implicit PD] -> applied_torque
-     -> [PHM 업데이트: 전류/손실/전력/에너지/SOC/전압] -> (온도/피로 등 PHM state)
+     -> [열화 상태 업데이트: 전류/손실/전력/에너지/SOC/전압] -> (온도/피로 등 health state)
      -> [열화 주입: Kp/Kd/effort limit 감소 + brownout 스케일] -> 다시 PhysX
 
 별도(BMS 예측) 가지:
@@ -30,16 +30,16 @@ Unitree Go2 RealObs 프로젝트: 모터(전기) 모델링 구조 설명 (PD -> 
 세부: 제어 루프 vs 물리(substep) 루프
 ------------------------------------
 이 환경은 control step 내부에서 decimation(여러 substep)을 돌립니다.
-핵심은 "substep마다 실제 applied_torque가 나온 뒤 PHM을 적분한다"는 점입니다.
+핵심은 "substep마다 실제 applied_torque가 나온 뒤 열화/건전성 상태를 적분한다"는 점입니다.
 
 - Control step 시작(substep 0):
   1) action을 적용해서 joint_pos_target을 최신으로 만듭니다.
   2) (BMS 관점) PD 기반 전압 예측 -> brownout 스케일 결정
-  3) (Physics 관점) PHM 상태(온도/피로)를 기반으로 Kp/Kd/effort limits를 계산해
+  3) (Physics 관점) 열화 상태(온도/피로)를 기반으로 Kp/Kd/effort limits를 계산해
      시뮬레이터에 주입합니다.
 
 - 이후 각 physics substep:
-  4) sim.step() 후, PhysX가 실제로 적용한 토크/속도를 읽어 PHM(전기/열/배터리)을 적분합니다.
+  4) sim.step() 후, PhysX가 실제로 적용한 토크/속도를 읽어 열화 상태(전기/열/배터리)를 적분합니다.
   5) substep 동안 최저 전압(min voltage)을 추적합니다.
 
 “PD로 요구 토크를 계산하냐?”에 대한 정확한 답
@@ -79,7 +79,7 @@ B. 예측(BMS/brownout) 경로: PD로 요구 토크를 계산합니다.
 ---------------------------------------------------------------
 - 모터 드라이버 전류 루프, PWM, back-EMF(V = IR + Ke*w), 전기 동역학(인덕턴스) 같은
   상세한 전기-기계 연성 모델을 PhysX actuator에 직접 붙여서 토크를 만드는 방식은 아닙니다.
-- 대신 “토크 결과를 기반으로 전류/손실/배터리 sag를 계산”하는 PHM 레벨 모델입니다.
+- 대신 “토크 결과를 기반으로 전류/손실/배터리 sag를 계산”하는 열화/건전성 레벨 모델입니다.
 
 상대에게 보내기 좋은 답변(붙여넣기용)
 -----------------------------------
@@ -87,7 +87,7 @@ B. 예측(BMS/brownout) 경로: PD로 요구 토크를 계산합니다.
 정책은 관절 위치 타겟(joint_pos_target)을 주고 PhysX/IsaacLab의 Implicit PD가 실제 토크를 만듭니다.
 그 다음 물리엔진이 실제로 적용한 토크(applied_torque)와 관절 속도(joint_vel)를 읽어서
 I ≈ |tau|/(Kt*gear)로 전류를 추정하고, I^2R(T)+인버터+마찰/코어손실+기계일을 합쳐 부하전력을 만든 뒤,
-SOC 적분과 OCV-IR sag로 배터리 전압을 계산해 PHM 상태(온도/피로/전압/브라운아웃)를 업데이트합니다.
+SOC 적분과 OCV-IR sag로 배터리 전압을 계산해 열화 상태(온도/피로/전압/브라운아웃)를 업데이트합니다.
 다만 brownout 전압 예측은 물리 step 전에 applied_torque를 모르기 때문에 PD로 요구토크를 추정해
 예측 전압을 만들고, 그걸로 토크 한계(effort limit)를 스케일링합니다.
 

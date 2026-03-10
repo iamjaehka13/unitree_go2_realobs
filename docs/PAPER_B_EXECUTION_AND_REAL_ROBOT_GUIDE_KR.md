@@ -16,7 +16,7 @@
 1. `Baseline`
 2. `RealObs-ObsOnly`
 3. `RealObs-Full`
-4. `Strategic PHM`
+4. `Strategic`
 
 사이드 실험은 아래 2개만 유지한다.
 
@@ -41,7 +41,7 @@
    measurable-only observations, baseline rewards
 3. `RealObs-Full`
    measurable-only observations, observable safety rewards
-4. `Strategic PHM`
+4. `Strategic`
    privileged upper bound
 5. `RealObs-TempDose`
    thermal-dose side ablation only

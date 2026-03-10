@@ -36,7 +36,7 @@ even without privileged degradation state access.
 
 1. `Baseline` 대비 `RealObs-ObsOnly`가 measurable-only 관측 자체의 가치를 보여준다.
 2. `RealObs-ObsOnly` 대비 `RealObs-Full`이 observable safety reward의 추가 기여를 보여준다.
-3. `Strategic PHM`은 deployment policy가 아니라 privileged upper bound다.
+3. `Strategic`은 deployment policy가 아니라 privileged upper bound다.
 4. `TempDose`는 메인 claim이 아니라 thermal semantics side ablation이다.
 
 
@@ -50,7 +50,7 @@ even without privileged degradation state access.
    measurable-only observations, baseline rewards
 3. `RealObs-Full`
    measurable-only observations, observable safety rewards
-4. `Strategic PHM`
+4. `Strategic`
    privileged upper bound
 
 사이드 실험:
@@ -233,7 +233,7 @@ Baseline -> ObsOnly -> RealObs -> Strategic
 1. `Baseline`
 2. `RealObs-ObsOnly`
 3. `RealObs-Full`
-4. `Strategic PHM`
+4. `Strategic`
 5. `RealObs-TempDose`
 
 표/그림 short label:

@@ -18,7 +18,7 @@
 - [ ] Train fault mode: `single_motor_random`
 - [ ] Eval fault mode: `single_motor_fixed` + motor id `0..11`
 - [ ] 시나리오: `fresh/used/aged/critical`
-- [ ] 커리큘럼: velocity(160~500), DR(501~1000), push(1001~1600), PHM(1601~3000), 이후 final mixture 고정
+- [ ] 커리큘럼: velocity(160~500), DR(501~1000), push(1001~1600), degradation exposure(1601~3000), 이후 final mixture 고정
 - [ ] PPO 스케줄: entropy 0.01 -> 0.005 -> 0.003, action std cap-only + late limiter
 
 ========================================================================

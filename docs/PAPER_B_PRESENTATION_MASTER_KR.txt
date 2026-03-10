@@ -13,7 +13,7 @@ Paper B Presentation Master
 2. 발표자가 반복해서 써야 하는 문장을 고정한다.
 3. 코드 질문에 대한 답변 프레임을 고정한다.
 
-이 문서는 더 이상 옛 distillation 중심 서사, replay 평가 중심 서사, PHM 플랫폼 소개 문서를 따르지 않는다.
+이 문서는 더 이상 옛 distillation 중심 서사, replay 평가 중심 서사, privileged hidden-state 플랫폼 소개 문서를 따르지 않는다.
 발표의 중심은 아래 한 문장이다.
 
 "배치 가능한 measurable-only channels만으로 motor degradation 하의 safety benefit을 얼마나 회복할 수 있는가."
@@ -29,7 +29,7 @@ Paper B Presentation Master
 - `Baseline`
 - `RealObs-ObsOnly`
 - `RealObs-Full`
-- `Strategic PHM`
+- `Strategic`
 
 0.3 사이드 실험
 - `RealObs-TempDose`
