@@ -38,3 +38,11 @@ def scenario_label(name: str) -> str:
 
 def scenario_labels(names: list[str]) -> list[str]:
     return [scenario_label(name) for name in names]
+
+
+def scenario_lookup_keys(name: str) -> tuple[str, ...]:
+    key = scenario_key(name)
+    label = scenario_label(key)
+    if label == key:
+        return (key,)
+    return (label, key)

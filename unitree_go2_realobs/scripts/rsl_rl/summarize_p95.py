@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from scenario_labels import scenario_label
+from scenario_labels import scenario_label, scenario_lookup_keys
 
 
 METRIC_SPECS: dict[str, dict[str, str]] = {
@@ -177,7 +177,12 @@ def main() -> None:
         except Exception:
             continue
 
-        critical = data.get("critical")
+        critical = None
+        for candidate in scenario_lookup_keys("critical"):
+            payload = data.get(candidate)
+            if isinstance(payload, dict):
+                critical = payload
+                break
         if not isinstance(critical, dict):
             continue
 

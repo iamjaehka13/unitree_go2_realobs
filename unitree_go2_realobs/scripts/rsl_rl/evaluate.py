@@ -1441,8 +1441,9 @@ def run_evaluation(
     dump_timeseries_output_dir: str = "./eval_results",
 ) -> dict:
     """Run evaluation for one scenario, collecting episode-level statistics."""
+    scenario_label = _scenario_label(scenario_name)
     print(f"\n{'='*60}")
-    print(f"  Evaluating scenario: {scenario_name}")
+    print(f"  Evaluating scenario: {scenario_label}")
     print(f"  Description: {SCENARIOS[scenario_name]['description']}")
     print(f"  Target episodes: {num_target_episodes}")
     print(f"{'='*60}")
@@ -1568,7 +1569,7 @@ def run_evaluation(
             ts_enabled = False
         else:
             print(
-                f"[INFO] Timeseries dump enabled for scenario={scenario_name}, env_id={ts_env}, "
+                f"[INFO] Timeseries dump enabled for scenario={scenario_label}, env_id={ts_env}, "
                 f"max_steps={ts_max_steps}."
             )
 
@@ -1578,7 +1579,7 @@ def run_evaluation(
             return
         os.makedirs(dump_timeseries_output_dir, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_name = f"timeseries_{scenario_name}_env{ts_env}_{stamp}"
+        base_name = f"timeseries_{scenario_label}_env{ts_env}_{stamp}"
         ts_path = os.path.join(dump_timeseries_output_dir, f"{base_name}.csv")
         with open(ts_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(ts_rows[0].keys()))
@@ -1588,6 +1589,7 @@ def run_evaluation(
         ts_meta_path = os.path.join(dump_timeseries_output_dir, f"{base_name}_meta.json")
         meta = {
             "scenario": str(scenario_name),
+            "scenario_label": str(scenario_label),
             "env_id": int(ts_env),
             "rows": int(len(ts_rows)),
             "dt": float(dt),
@@ -3490,8 +3492,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # Save results
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     result_path = os.path.join(output_dir, f"eval_{timestamp}.json")
+    export_results = {_scenario_label(scenario_name): summary for scenario_name, summary in all_results.items()}
     with open(result_path, "w") as f:
-        json.dump(all_results, f, indent=2)
+        json.dump(export_results, f, indent=2)
     print(f"\n[DONE] Results saved to: {result_path}")
 
     meta_path = os.path.join(output_dir, f"eval_{timestamp}_meta.json")
@@ -3619,6 +3622,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "eval_scenarios": list(_scenario_labels(scenario_names_for_run)),
         "eval_scenario_keys": list(scenario_names_for_run),
         "eval_scenario_label_map": {key: PAPER_SCENARIO_LABELS[key] for key in scenario_names_for_run},
+        "eval_artifact_scenario_format": "paper_labels",
         "eval_cmd_profile": str(effective_eval_cmd_profile),
         "eval_cmd_profile_requested": str(requested_eval_cmd_profile),
         "eval_cmd_profile_effective": str(effective_eval_cmd_profile),
@@ -3852,6 +3856,7 @@ def print_paper_table(results: dict, temp_metric_semantics: str = "coil_hotspot"
     print(f"Scenario & Survival (\\%) & Track. Err & Power (W) & Energy (J) & Max Temp ({temp_metric_semantics}, °C) & Final SOC \\\\")
     print("\\midrule")
     for scenario_name, summary in results.items():
+        scenario_label = _scenario_label(scenario_name)
         surv = summary.get("survived", {}).get("mean", 0) * 100
         trk = summary.get("mean_tracking_error_xy", {}).get("mean", 0)
         trk_std = summary.get("mean_tracking_error_xy", {}).get("std", 0)
@@ -3860,7 +3865,7 @@ def print_paper_table(results: dict, temp_metric_semantics: str = "coil_hotspot"
         temp_key = f"final_max_temp_{temp_metric_semantics}"
         tmp = summary.get(temp_key, summary.get("final_max_temp", {})).get("mean", 0)
         soc = summary.get("final_soc", {}).get("mean", 0)
-        print(f"{scenario_name.capitalize()} & {surv:.1f} & {trk:.4f}$\\pm${trk_std:.4f} & {pwr:.1f} & {eng:.1f} & {tmp:.1f} & {soc:.3f} \\\\")
+        print(f"{scenario_label.capitalize()} & {surv:.1f} & {trk:.4f}$\\pm${trk_std:.4f} & {pwr:.1f} & {eng:.1f} & {tmp:.1f} & {soc:.3f} \\\\")
     print("\\bottomrule")
     print("\\end{tabular}")
     print("\\end{table}")

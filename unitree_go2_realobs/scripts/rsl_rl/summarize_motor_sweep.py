@@ -9,7 +9,11 @@ import statistics
 from pathlib import Path
 from typing import Any
 
-from scenario_labels import scenario_key as _scenario_key, scenario_label as _scenario_label
+from scenario_labels import (
+    scenario_key as _scenario_key,
+    scenario_label as _scenario_label,
+    scenario_lookup_keys as _scenario_lookup_keys,
+)
 
 
 MIRROR_PAIRS = ((0, 3), (1, 4), (2, 5), (6, 9), (7, 10), (8, 11))
@@ -68,14 +72,15 @@ def _collect_runs(eval_results_dir: Path, glob_pattern: str) -> dict[int, dict[s
 
 def _metric_mean(eval_result: dict[str, Any], scenario: str, metric: str) -> float:
     scenario_key = _scenario_key(scenario)
-    s = eval_result.get(scenario_key, {})
-    if not isinstance(s, dict):
-        return float("nan")
-    v = s.get(metric, None)
-    if isinstance(v, dict):
-        return float(v.get("mean", float("nan")))
-    if isinstance(v, (int, float)):
-        return float(v)
+    for candidate in _scenario_lookup_keys(scenario_key):
+        s = eval_result.get(candidate, {})
+        if not isinstance(s, dict):
+            continue
+        v = s.get(metric, None)
+        if isinstance(v, dict):
+            return float(v.get("mean", float("nan")))
+        if isinstance(v, (int, float)):
+            return float(v)
     return float("nan")
 
 
